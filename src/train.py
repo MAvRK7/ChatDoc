@@ -26,9 +26,9 @@ class TrainConfig:
 
     log_dir = os.path.join(repo_root, "outputs/runs")
 
-    batch_size = 16
-    grad_accum_steps = 4
-    max_length = 1024
+    batch_size = 4
+    grad_accum_steps = 8
+    max_length = 512
 
     lr = 1e-4
     weight_decay = 0.01
@@ -147,9 +147,9 @@ def train():
         dim=768,
         num_layers=12,
         num_heads=12,
-        ffn_hidden_dim=2048,
+        ffn_hidden_dim=1536,
         num_experts=4,
-        k=2,
+        k=1,
         max_seq_len=cfg.max_length,
     ).to(cfg.device)
 
