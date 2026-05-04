@@ -14,16 +14,15 @@ from torch.utils.tensorboard import SummaryWriter
 from src.dataset.dataset import ConversationDataset, collate_batch
 from src.model.transformer import MoETransformer
 
-# -----------------------------
-# CONFIG
-# -----------------------------
+
 class TrainConfig:
     repo_root = os.getcwd()
 
     train_path = os.path.join(repo_root, "data/processed/train_formatted.jsonl")
     val_path = os.path.join(repo_root, "data/processed/val_formatted.jsonl")
-    tokenizer_path = os.path.join(repo_root, "tokenizer/tokenizer.json.model")
-    save_path = os.path.join(repo_root, "checkpoints/model.pt")
+    tokenizer_path = os.path.join(repo_root, "tokenizer/tokenizer.model")  
+    #save_path = os.path.join(repo_root, "checkpoints/model.pt")
+    save_path = os.path.join(repo_root, "checkpoints", "model.pt")
 
     log_dir = os.path.join(repo_root, "outputs/runs")
 
@@ -46,9 +45,6 @@ class TrainConfig:
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# -----------------------------
-# LR SCHEDULER
-# -----------------------------
 def cosine_lr(step, max_steps, base_lr, warmup_steps):
     if step < warmup_steps:
         return base_lr * step / warmup_steps
@@ -56,10 +52,7 @@ def cosine_lr(step, max_steps, base_lr, warmup_steps):
     return base_lr * 0.5 * (1 + math.cos(math.pi * p))
 
 
-# -----------------------------
-# EVAL
-# -----------------------------
-def evaluate(model, dl, device, vocab_size):
+def evaluate(model, dl, device, vocab_size, pad_id):
     model.eval()
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -85,15 +78,21 @@ def evaluate(model, dl, device, vocab_size):
     return total_loss / max(count, 1)
 
 
-# -----------------------------
-# GENERATION
-# -----------------------------
-def generate(model, sp, prompt, device, max_new_tokens=80):
+def generate(model, tok, prompt, device, max_new_tokens=80):
+    """Generation with proper tokenizer API."""
     model.eval()
 
-    eos_id = sp.eos_id()
-
-    ids = sp.encode(prompt)
+    # Get IDs from tokenizer
+    eos_id = tok.piece_to_id("<eos>")
+    bos_id = tok.piece_to_id("<bos>")
+    
+    # Encode prompt
+    ids = tok.EncodeAsIds(prompt)
+    
+    # Optionally prepend BOS if not present
+    if len(ids) == 0 or ids[0] != bos_id:
+        ids = [bos_id] + ids
+        
     x = torch.tensor([ids], device=device)
 
     with torch.no_grad():
@@ -109,14 +108,13 @@ def generate(model, sp, prompt, device, max_new_tokens=80):
 
             x = torch.cat([x, next_id], dim=1)
 
-    out = sp.decode(x[0].tolist())
+    # Decode IDs back to text
+    out_ids = x[0].tolist()
+    out = tok.DecodeIds(out_ids)
     model.train()
     return out
 
 
-# -----------------------------
-# TRAIN
-# -----------------------------
 def train():
     cfg = TrainConfig()
 
@@ -125,17 +123,24 @@ def train():
 
     writer = SummaryWriter(cfg.log_dir)
 
-    # tokenizer (SentencePiece ONLY)
-    sp = spm.SentencePieceProcessor(model_file=cfg.tokenizer_path)
+    # Load tokenizer
+    sp = spm.SentencePieceProcessor()
+    sp.load(cfg.tokenizer_path)
     vocab_size = sp.get_piece_size()
+    
+    # Get special token IDs
+    pad_id = sp.piece_to_id("<pad>")
+    eos_id = sp.piece_to_id("<eos>")
+    bos_id = sp.piece_to_id("<bos>")
 
-    train_ds = ConversationDataset(cfg.train_path, sp, cfg.max_length)
-    val_ds = ConversationDataset(cfg.val_path, sp, cfg.max_length)
+    # Pass tokenizer_path instead of tokenizer object
+    train_ds = ConversationDataset(cfg.train_path, cfg.tokenizer_path, cfg.max_length)
+    val_ds = ConversationDataset(cfg.val_path, cfg.tokenizer_path, cfg.max_length)
 
     train_dl = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
-                          collate_fn=lambda x: collate_batch(x, pad_id=0))
+                          collate_fn=lambda x: collate_batch(x, pad_id=pad_id))
     val_dl = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
-                        collate_fn=lambda x: collate_batch(x, pad_id=0))
+                        collate_fn=lambda x: collate_batch(x, pad_id=pad_id))
 
     model = MoETransformer(
         vocab_size=vocab_size,
@@ -153,9 +158,6 @@ def train():
     scaler = amp.GradScaler(enabled=(cfg.device == "cuda"))
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-    # -----------------------------
-    # RESUME
-    # -----------------------------
     start_step = 0
 
     if os.path.exists(cfg.save_path):
@@ -178,7 +180,6 @@ def train():
     step = start_step
     best_val_loss = float("inf")
     no_improve_steps = 0
-    opt_step = 0
     opt.zero_grad()
 
     model.train()
@@ -188,7 +189,6 @@ def train():
             batch = batch.to(cfg.device)
             labels = labels.to(cfg.device)
 
-            # Forward + loss calculation with autocast
             with amp.autocast(device_type="cuda", enabled=(cfg.device == "cuda")):
                 logits, aux = model(batch)
             
@@ -197,7 +197,6 @@ def train():
             
                 ce_loss = loss_fn(logits_flat, labels_flat)
 
-                # Safe MoE auxiliary loss handling
                 if isinstance(aux, dict):
                     moe_loss = aux.get("moe_loss", torch.tensor(0.0, device=cfg.device))
                 else:
@@ -205,10 +204,8 @@ def train():
 
                 loss = ce_loss + 0.01 * moe_loss
 
-            # Backward pass - OUTSIDE autocast (this part was already mostly correct)
             scaler.scale(loss).backward()
 
-            # === DEBUG ===
             if step % 200 == 0:
                 with torch.no_grad():
                     preds = torch.argmax(logits_flat, dim=-1)
@@ -216,8 +213,12 @@ def train():
                     correct = (preds[mask] == labels_flat[mask]).float().mean()
                     print(f"[DEBUG] token_acc={correct.item():.4f}")
                     writer.add_scalar("train/token_acc", correct.item(), step)
+            
+            # Add this temporarily in train.py inside the training loop DEBUG 2
+            if step == 500:
+                print("Label stats:", (labels != -100).sum().item(), "trainable out of", labels.numel())
+                print("First batch labels:", labels[0, :20])
 
-            # === MoE HEALTH MONITORING ===
             if isinstance(aux, dict) and "gate_scores" in aux and len(aux["gate_scores"]) > 0:
                 gs = aux["gate_scores"][0]
                 expert_usage = gs.mean(dim=(0, 1))
@@ -226,7 +227,6 @@ def train():
                 for i, usage in enumerate(expert_usage):
                     writer.add_scalar(f"moe/expert_{i}", usage.item(), step)
 
-            # ====================== OPTIMIZER STEP ======================
             if (step + 1) % cfg.grad_accum_steps == 0:
                 lr = cosine_lr(step, cfg.max_steps, cfg.lr, cfg.warmup_steps)
                 for g in opt.param_groups:
@@ -238,9 +238,8 @@ def train():
                 scaler.update()
                 opt.zero_grad()
 
-                writer.add_scalar("train/lr", lr, step)   # changed from opt_step
+                writer.add_scalar("train/lr", lr, step)
 
-            # ====================== LOGGING ======================
             if step % cfg.log_every == 0:
                 current_loss = (ce_loss + 0.01 * moe_loss).detach().item()
                 current_lr = opt.param_groups[0]["lr"]
@@ -261,13 +260,11 @@ def train():
                     f"ppl={ppl:.2f}"
                 )
 
-            # ====================== EVALUATION & EARLY STOPPING ======================
             if step % cfg.eval_every == 0 and step > 0:
-                val_loss = evaluate(model, val_dl, cfg.device, vocab_size)
+                val_loss = evaluate(model, val_dl, cfg.device, vocab_size, pad_id)
                 print(f"[VAL] {step} loss={val_loss:.4f}")
                 writer.add_scalar("val/loss", val_loss, step)
 
-                # Early stopping
                 if val_loss < best_val_loss - cfg.early_stopping_min_delta:
                     best_val_loss = val_loss
                     no_improve_steps = 0
@@ -284,15 +281,14 @@ def train():
                         print("Early stopping triggered.")
                         return
 
-                # Generation sample
+                # FIXED: Pass tokenizer object properly
                 sample = generate(
                     model, sp,
-                    "<user> I have a headache. What can I do? <assistant>",
+                    "<user> I have a headache. What can I do? <assistant> ",
                     cfg.device
                 )
                 print("[GEN]", sample)
 
-            # Move to next step
             step += 1
             if step >= cfg.max_steps:
                 break

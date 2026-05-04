@@ -1,64 +1,100 @@
 import json
-import argparse
 import random
 import os
 from tqdm import tqdm
 
+
 def load_jsonl(path):
     items = []
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line in tqdm(f, desc=f"Reading {os.path.basename(path)}", unit="lines"):
             line = line.strip()
             if not line:
                 continue
             try:
                 items.append(json.loads(line))
-            except:
+            except json.JSONDecodeError:
                 continue
     return items
 
 
-def merge_files(files, output_file):
-    all_items = []
+def merge_and_split(train_files, val_files, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
 
-    print("\n📥 Loading datasets...")
-    for fpath in files:
+    # -------------------------
+    # Load training data
+    # -------------------------
+    print("\n📥 Loading training datasets...")
+    train_items = []
+    for fpath in tqdm(train_files, desc="Train files", unit="file"):
         print(f" → {fpath}")
         items = load_jsonl(fpath)
-        all_items.extend(items)
+        train_items.extend(items)
 
-    print(f"\n🔀 Shuffling {len(all_items)} conversations...")
-    random.shuffle(all_items)
+    print(f"\n🔀 Shuffling {len(train_items):,} training samples...")
+    random.shuffle(train_items)
 
-    print(f"\n💾 Writing merged dataset → {output_file}")
-    with open(output_file, "w", encoding="utf-8") as out:
-        for item in tqdm(all_items, desc="Saving"):
-            out.write(json.dumps(item, ensure_ascii=False) + "\n")
+    # -------------------------
+    # Load validation data
+    # -------------------------
+    print("\n📥 Loading validation datasets...")
+    val_items = []
+    for fpath in tqdm(val_files, desc="Val files", unit="file"):
+        print(f" → {fpath}")
+        items = load_jsonl(fpath)
+        val_items.extend(items)
 
-    print(f"\n✅ Done. Total merged conversations: {len(all_items)}")
+    print(f"\n🔀 Shuffling {len(val_items):,} validation samples...")
+    random.shuffle(val_items)
+
+    # -------------------------
+    # Save merged datasets
+    # -------------------------
+    train_raw = os.path.join(output_dir, "train.jsonl")
+    val_raw = os.path.join(output_dir, "val.jsonl")
+
+    print("\n💾 Saving training data...")
+    with open(train_raw, "w", encoding="utf-8") as f:
+        for item in tqdm(train_items, desc="Saving train", unit="samples"):
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    print("\n💾 Saving validation data...")
+    with open(val_raw, "w", encoding="utf-8") as f:
+        for item in tqdm(val_items, desc="Saving val", unit="samples"):
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    print("\n✅ Raw merged:")
+    print(f"   → {train_raw} ({len(train_items):,} samples)")
+    print(f"   → {val_raw} ({len(val_items):,} samples)")
+
+    return train_raw, val_raw
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=str, required=True)
-    parser.add_argument("--files", nargs="+", required=True)
-    args = parser.parse_args()
+    # Define your files
+    train_files = [
+        "data/raw/ultrachat_train.jsonl",
+        "data/raw/smol-rewrite_train.jsonl",
+        "data/raw/smol-summarize_train.jsonl",
+    ]
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    val_files = [
+        "data/raw/ultrachat_val.jsonl",
+        "data/raw/smol-rewrite_test.jsonl",
+        "data/raw/smol-summarize_test.jsonl",
+    ]
 
-    merge_files(args.files, args.out)
+    train_raw, val_raw = merge_and_split(train_files, val_files, "data/processed")
+
+    print("\n" + "=" * 50)
+    print("NEXT STEPS:")
+    print("=" * 50)
+    print("1. Format training data:")
+    print(f"   python scripts/format.py --input {train_raw} --output data/processed/train_formatted.jsonl")
+    print("2. Format validation data:")
+    print(f"   python scripts/format.py --input {val_raw} --output data/processed/val_formatted.jsonl")
+    print("3. Train:")
+    print("   python -m src.train")
 
 # Run 
-'''
-python scripts/merge_datasets.py \
-    --out data/processed/merged.jsonl \
-    --files data/processed/meddialog_train.jsonl \
-            data/processed/meddialog_dev.jsonl \
-            data/processed/raw_clean.jsonl \
-            data/processed/healthcaremagic.jsonl \
-            data/processed/medquad.jsonl \
-            data/processed/combined_greetings_identity.jsonl \
-            data/processed/adversarial.jsonl \
-            data/processed/mental_health.jsonl 
-
-'''
+# python scripts/merge_datasets.py

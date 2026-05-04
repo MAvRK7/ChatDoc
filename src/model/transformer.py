@@ -69,12 +69,8 @@ class MultiHeadSelfAttention(nn.Module):
 
         q, k = apply_rope(q, k)
 
-        att = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=None if mask is None else mask[:, None, None, :],
-            dropout_p=0.0,
-            is_causal=True
-        )
+        # for causal models only
+        att = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
 
         out = att.transpose(1, 2).contiguous().view(b, t, d)
         return self.out(out)

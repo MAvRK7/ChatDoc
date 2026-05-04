@@ -1,99 +1,138 @@
+import csv
 import re
 import json
 import argparse
 from tqdm import tqdm
 
 # -----------------------------------
-# BASIC CLEANING (FAST, NO NER)
+# BASIC CLEANING
 # -----------------------------------
 
 def clean_text(text: str) -> str:
     if not text:
         return ""
 
-    # Remove emails
     text = re.sub(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', '[EMAIL]', text)
-
-    # Remove URLs
     text = re.sub(r'https?://\S+|www\.\S+', '[URL]', text)
-
-    # Remove phone numbers
     text = re.sub(r'\b\+?\d[\d\-\s]{6,}\d\b', '[PHONE]', text)
-
-    # Remove common signatures
+    
+    # Strip trailing escaped quotes and whitespace junk
+    text = re.sub(r'\\+"\s*\\+"\s*$', '', text)
+    text = re.sub(r'"\s+"\s*$', '', text)
+    text = re.sub(r'\\+\s*$', '', text)
+    
+    # Remove template signatures
     text = re.sub(r"thank you.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"regards.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"chatdoctor.*$", "", text, flags=re.IGNORECASE)
-
-    # Fix spacing
+    text = re.sub(r"chat\s*doctor.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"hope this helps.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"wish you.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"all the best.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"take care.*$", "", text, flags=re.IGNORECASE)
+    
     text = re.sub(r"\s+", " ", text)
-
+    text = text.strip(' \t\n\r"\\')
+    
     return text.strip()
 
 
 # -----------------------------------
-# PROCESS RAW DATASET
+# EXTRACT PAIRS FROM ONE CONVERSATION BLOCK
 # -----------------------------------
 
-def process_raw_dataset(text):
+def extract_pairs_from_block(block_text):
+    """Extract all Human->AI pairs from a single conversation block."""
     conversations = []
-
-    blocks = text.split("The conversation between human and AI assistant.")
-
-    for block in tqdm(blocks, desc="Parsing raw dataset"):
-        block = block.strip()
-        if not block:
+    
+    # Split on Human tags
+    parts = block_text.split("[|Human|]")
+    
+    for part in parts[1:]:  # skip empty first split
+        if "[|AI|]" not in part:
             continue
-
-        parts = block.split("[|Human|]")
-
-        for part in parts:
-            if "[|AI|]" not in part:
-                continue
-
-            human, ai = part.split("[|AI|]", 1)
-
-            human = clean_text(human.strip())
-            ai = clean_text(ai.strip())
-
-            if len(human) < 5 or len(ai) < 5:
-                continue
-
-            conversations.append({
-                "messages": [
-                    {"role": "user", "content": human},
-                    {"role": "assistant", "content": ai}
-                ]
-            })
-
+            
+        human, ai = part.split("[|AI|]", 1)
+        human = clean_text(human.strip())
+        ai = clean_text(ai.strip())
+        
+        # VALIDATE
+        if len(human) < 20 or len(ai) < 20:
+            continue
+        if len(human.split()) < 5 or len(ai.split()) < 10:
+            continue
+        if "[|Human|]" in ai or "[|AI|]" in human:
+            continue
+        # Reject cut-off answers
+        if ai.endswith(("and", "or", "but", "to", "the", "a", "is", "are", "for")):
+            continue
+            
+        conversations.append({
+            "messages": [
+                {"role": "user", "content": human},
+                {"role": "assistant", "content": ai}
+            ]
+        })
+    
     return conversations
 
 
 # -----------------------------------
-# PROCESS MEDDIALOG
+# PROCESS CSV FILE (ROW BY ROW)
+# -----------------------------------
+
+def process_csv_file(input_path):
+    """Read CSV row by row — each row is one conversation block."""
+    conversations = []
+    
+    with open(input_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        
+        # Skip header
+        try:
+            header = next(reader)
+        except StopIteration:
+            return conversations
+        
+        for row in tqdm(reader, desc="Processing CSV rows"):
+            if not row:
+                continue
+                
+            # The conversation text is in the first column
+            text = row[0] if row else ""
+            if not text:
+                continue
+            
+            # Clean up CSV quoting artifacts
+            text = text.strip('"')
+            text = text.replace('""', '"')  # Unescape CSV quotes
+            
+            # Extract pairs from this single row/block
+            pairs = extract_pairs_from_block(text)
+            conversations.extend(pairs)
+    
+    return conversations
+
+
+# -----------------------------------
+# PROCESS MEDDIALOG (unchanged)
 # -----------------------------------
 
 def process_med_dialogue(data):
     conversations = []
-
     for item in tqdm(data, desc="Processing MedDialog"):
         utts = item.get("utterances", [])
         if len(utts) < 2:
             continue
-
         user = clean_text(utts[0].replace("patient:", "").strip())
         assistant = clean_text(utts[1].replace("doctor:", "").strip())
-
         if len(user) < 5 or len(assistant) < 5:
             continue
-
         conversations.append({
             "messages": [
                 {"role": "user", "content": user},
                 {"role": "assistant", "content": assistant}
             ]
         })
-
     return conversations
 
 
@@ -108,11 +147,8 @@ def clean_dataset(input_file, output_file):
         with open(input_file, "r", encoding="utf-8") as f:
             data = json.load(f)
         conversations = process_med_dialogue(data)
-
     else:
-        with open(input_file, "r", encoding="utf-8") as f:
-            text = f.read()
-        conversations = process_raw_dataset(text)
+        conversations = process_csv_file(input_file)
 
     print(f"\n💾 Writing: {output_file}")
 
@@ -121,20 +157,14 @@ def clean_dataset(input_file, output_file):
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
 
     print(f"\n✅ Done. Total conversations: {len(conversations)}")
-    
 
-# -----------------------------------
-# CLI
-# -----------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-
     clean_dataset(args.input, args.output)
-
 
 # Run 
 # Dataset 1 (MedDialogue)
