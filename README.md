@@ -1,29 +1,67 @@
-# ChatDoc
+# Aura-MoE
 
-A language model 
+A Sparse Mixture-of-Experts Architecture from Scratch
 
 ## 🧾 Quick facts:
 
-- 120M parameters 
-- MoE architecture (4 experts, top‑2 routing) [Equivalent to a 250M–300M dense model]
-- 1024 context length
-- Trains in 3–4 hours A100 GPU
-- Fits in 4GB VRAM at inference
-- Perfect for medical Q&A
+- Parameters: 138M (Architecture equivalent to a 250M–300M dense model)
+- Architecture: 12-layer Transformer with Interleaved Dense and MoE blocks.
+- MoE Config: 4 Experts with Top-1 Routing (k=1).
+- Context Length: 1024 token
+- Efficiency: Fits in 4GB VRAM at inference; trains in ~4 hours on an A100
+- Tokenizer: Custom 20k vocabulary SentencePiece model.
+- Uses RoPE (Rotary Positional Embeddings) and SwiGLU activators.
+
+Aura-MoE is a 138M parameter Transformer model implementing a sparse Mixture-of-Experts (MoE) layer. This project serves as a deep-dive into the engineering challenges of training MoE architectures, featuring custom implementations of modern LLM components like RoPE, SwiGLU, and FlashAttention.
 
 Other details:
 
-Has FlashAttention for speed, RMSNorm for stability, SwiGLU FFN, 20k BPE tokenizer
+Has FlashAttention for speed, RMSNorm for stability, 20k sentancepiece tokenizer
 
-Total samples: 221318. Total tokens: 51,757,583. Average tokens per sample: 233.86. Vocab size: 20,000
+| Metric                              | Value        |
+|-------------------------------------|--------------|
+| Total samples (turn-level)          | 710,647      |
+| Total tokens (after truncation)     | 234,781,772  |
+| Trainable tokens (assistant only)   | 165,057,619  |
+| Average tokens per sample           | 330.38       |
+| Trainable ratio                     | 70.30%       |
+| Vocab size                          | 20,000       |
+
+---
+
+## 🏗️ Technical Architecture
+
+The model is built with a decoupled, modular design to allow for rapid experimentation with routing and expert scaling.  
+
+- Parameter Count: 138,534,912  
+
+- Layers: 12-layer Transformer (Interleaved Dense and MoE blocks)  
+
+- MoE Config: 4 Experts, Top-1 Routing (k=1)  
+
+- Hidden Dimension: 768  
+
+- Context Window: 1024 token
+
+### Key Engineering Features
+
+* Custom MoE Layer: Features a manual dispatch/combine logic with auxiliary load-balancing and Z-loss for gating stability.  
+
+* Rotary Positional Embeddings (RoPE): Implemented from scratch for better long-context performance.  
+
+* Optimized Inference: Includes a dedicated sampling engine with n-gram blocking and repetition penalty to manage semantic drift.  
+
+* Memory Efficiency: Built with torch.amp for mixed-precision training and gradient accumulation for larger effective batch sizes.
 
 ## 📦 Dataset 
 
 A custom dataset has been created for pre-training this model. It consists of:
 
-- Ultra Chat: 185202 (54.03%)
-- Smol Summarize: 101428 (29.59%)
-- Smol rewrite: 56150 (16.38%)
+| Dataset          | Samples | Percentage | Approx. Tokens |
+|------------------|---------|------------|----------------|
+| Ultra Chat       | 185,202 | 54.03%     | ~126M          |
+| Smol Summarize   | 101,428 | 29.59%     | ~69M           |
+| Smol Rewrite     | 56,150  | 16.38%     | ~39M           |
 
 Total dataset size: 342,780
     - Train size: 324,900 samples (95%)
@@ -34,91 +72,16 @@ Total dataset size: 342,780
 📂 File Structure 
 
 ```text
-chat-doctor/
-│
-├── data/                     # ignored
-│   ├── raw/
-│   │   ├── train.csv
-│   │   ├── test.csv
-│   │   ├── test.jsonl (for final test)
-│   │   ├── english-train.json (train of MedDialogue)
-│   │   ├── english-dev.json (val set of MedDialogue)
-│   │   ├── HealthCareMagic-100k.json
-│   │   └── medquad.csv
-│   │
-│   ├── processed/
-│   │   ├── merged.jsonl
-│   │   ├── train.jsonl (95% of merged.jsonl)
-│   │   ├── val.jsonl (5%)
-│   │   ├── healthcaremagic.jsonl
-│   │   ├── meddialog_dev.jsonl
-│   │   ├── medquad.jsonl
-│   │   ├── raw_clean.jsonl
-│   │   ├── combined_greetings_identity.jsonl
-│   │   ├── adversarial.jsonl
-│   │   └── mental_health
-│   │
-│   └── test/
-│       ├── in_domain.jsonl (200 samples from test.csv)
-│       ├── ood.jsonl
-│       └── safety.jsonl
-│
-├── outputs/                 # initial random weights output
-│   ├── runs/ #ignored
-│   │   └──logs (tfevents file) used for TensorBoard
-│   ├── in_domain_model_outputs
-│   ├── ood_model_outputs.jsonl
-│   └── safety_model_outputs.jsonl
-│
+
 ├── src/
-│   ├──__init__.py
-│   ├── tokenizer.py/
-│   │   ├── count_tokens.py
-│   │   ├── train_tokenizer.py
-│   │   ├── verify_tokenizer.py
-│   │   ├── sample_token_corpus.py
-│   │   ├── tokenizer.json.model
-│   │   ├── tokenizer.json.vocab
-│   │   ├── corpus.txt           # ignored
-│   │   ├── sample_token_corpus.py
-│   │   └── tokenizer_sampled.json_corpus.txt
-│   │
-│   ├── dataset/
-│   │   ├── dataset.py
-│   │   └── test_dataset.py
-│   │
 │   ├── model/
-│   │   ├── moe.py
-│   │   └── transformer.py
-│   │
-│   ├── scripts/
-│   │   ├── convert_csv_to_jsonl.py
-│   │   ├── convert_healthcaremagic.py
-│   │   ├── convert_medquad.py
-│   │   ├── dataset_cleaner.py
-│   │   ├── gen_multi_geetings.py
-│   │   ├── merge_datasets.py
-│   │   ├── analyze_dataset.py
-│   │   ├── split_cleaned_jsonl.py
-│   │   ├── edge_cases/
-│   │   │   ├── adversarial.py
-│   │   │   └── mental_health.py
-│   │   └── eval/
-│   │       └──  eval_sets.py
-│   │
-│   ├── sampling.py
-│   ├── inference.py
-│   ├── train.py
-│   ├── agent.py (WIP)
-│   └── utils/ (WIP)
-│       ├── config.py
-│       └── logging.py
-│
-├── config.yaml (WIP)
-├── tokenizer.json
-├── requirements.txt
-├── model.pt (the weights) # ignored
-└── README.md
+│   │   ├── transformer.py  # Core MoE Transformer & RoPE logic
+│   │   └── moe.py          # Expert dispatch & gating mechanism
+│   ├── dataset/            # Formatting & tokenization pipelines
+│   ├── engine/             # Training & Evaluation loops
+│   └── inference.py        # Generation with repetition penalties
+├── tokenizer/              # Custom SentencePiece model
+└── outputs/                # Tensorboard logs & OOD benchmarks
 
 ```
 ---
@@ -214,6 +177,13 @@ val/loss, val and val/perplexity
 
 The text generated during trining stages will also be visible in the Text section.
 ---
-Details after Phase I pre-training
-* Logits shape: torch.Size([2, 64, 8000])
-* MoE loss: 0.4164277911186218
+
+Note:
+
+Due to compute constraints (30k steps on ~0.5B tokens), the current checkpoint demonstrates high syntactic fluency and assistant-persona alignment but remains in the "early-convergence" phase regarding factual grounding
+
+Sample Output
+
+User: Explain AI in education?
+
+Assistant: The first step in the future of your life was to have a significant impact on our lives. Its life has been a crucial part of you, and it has had a positive impact on you. In this time, I have made you feel more confident in my life. It's a great way to focus on the life that we can do, and that we are all about the most importantly in our lives and how we can make a difference in your life. Let me know if you have any questions or need it?
