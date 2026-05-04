@@ -1,6 +1,6 @@
 # ChatDoc
 
-A language model built exclusively for medical purposes 
+A language model 
 
 ## 🧾 Quick facts:
 
@@ -21,22 +21,13 @@ Total samples: 221318. Total tokens: 51,757,583. Average tokens per sample: 233.
 
 A custom dataset has been created for pre-training this model. It consists of:
 
-* MedDialogue: 542 conversations (0.20%)
-* Medical Conversation Corpus (100k) (MCC): 106378 (39.69%)
-* HealthcareMagic: 108690 (40.55%)
-* MedQuAD: 16407 (6.12%)
-* Adversarial Questions: 10k (3.73%)
-* Mental Health related queries: 10k (3.73%)
-* Greetings, Identity and Refusal (GIR): 16k (5.97%)
+- Ultra Chat: 185202 (54.03%)
+- Smol Summarize: 101428 (29.59%)
+- Smol rewrite: 56150 (16.38%)
 
-    Breakdown of Greetings/Identity/Refusal:
-    - Greeting samples: 3000 (18.75%)
-    - Identity samples: 3000 (18.75%)
-    - Refusal samples: 10000 (62.50%)
-
-Total dataset size: 268,017
-    - Train size: 254,616 samples (95%)
-    - Val size: 13,401 samples (5%)
+Total dataset size: 342,780
+    - Train size: 324,900 samples (95%)
+    - Val size: 17,880 samples (5%)
 
 ---
 

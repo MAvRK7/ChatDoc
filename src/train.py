@@ -26,12 +26,12 @@ class TrainConfig:
 
     log_dir = os.path.join(repo_root, "outputs/runs")
 
-    batch_size = 8
+    batch_size = 16
     grad_accum_steps = 4
-    max_length = 512
+    max_length = 1024
 
     lr = 1e-4
-    weight_decay = 0.1
+    weight_decay = 0.01
 
     warmup_steps = 300
     max_steps = 30000
@@ -144,9 +144,9 @@ def train():
 
     model = MoETransformer(
         vocab_size=vocab_size,
-        dim=512,
-        num_layers=8,
-        num_heads=8,
+        dim=768,
+        num_layers=12,
+        num_heads=12,
         ffn_hidden_dim=2048,
         num_experts=4,
         k=2,
