@@ -44,14 +44,12 @@ print(f"Total unique prompts: {len(prompts)}")
 # This bypasses the multiprocessing worker crash
 print("Loading vLLM (single-process mode)...")
 llm = LLM(
-    model=MODEL_ID,
-    tensor_parallel_size=2,  # Keep both GPUs
-    dtype="bfloat16",        # Gemma-2 requires this
+    model="google/gemma-2-2b-it",
+    tensor_parallel_size=2,
+    dtype="half",
     gpu_memory_utilization=0.85,
     max_model_len=608,
-    enforce_eager=True,      # ← Disables CUDA graph caching, but fixes Kaggle spawn
-    distributed_executor_backend="mp",  # Force multiprocessing explicitly
-    # OR try: worker_use_ray=True if mp still fails
+    enforce_eager=True,
 )
 
 sampling_params = SamplingParams(
