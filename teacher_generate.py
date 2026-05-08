@@ -7,7 +7,7 @@ import multiprocessing as mp
 
 MODEL_ID = "google/gemma-2b-it"
 OUTPUT_FILE = "data/teacher_responses.jsonl"
-CHUNK_SIZE = 2000
+CHUNK_SIZE = 16
 
 
 def main():
@@ -50,9 +50,8 @@ def main():
         model=MODEL_ID,
         tensor_parallel_size=2,
         dtype="float16",
-        gpu_memory_utilization=0.90,
-        max_model_len=608,
-        enforce_eager=True,
+        gpu_memory_utilization=0.70,
+        max_model_len=512,
     )
 
     sampling_params = SamplingParams(
