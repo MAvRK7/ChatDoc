@@ -1,3 +1,7 @@
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 import json
@@ -50,15 +54,16 @@ def main():
         model=MODEL_ID,
         tensor_parallel_size=2,
         dtype="float16",
-        gpu_memory_utilization=0.70,
-        max_model_len=512,
+        gpu_memory_utilization=0.60,
+        max_model_len=256,
+        enforce_eager=True
     )
 
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        top_k=50,
-        max_tokens=96,
+        top_k=20,
+        max_tokens=64,
     )
 
     with open(OUTPUT_FILE, "w") as f_out:
