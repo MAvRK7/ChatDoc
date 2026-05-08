@@ -229,3 +229,4 @@ outputs/runs
 Thumbs.db
 
 scripts/finetune
+checkpoints/model.pt
