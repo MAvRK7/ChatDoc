@@ -5,5 +5,4 @@ tqdm
 tokenizers
 sentencepiece
 tensorboard
-vllm
 transformers

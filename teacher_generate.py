@@ -49,7 +49,7 @@ print("Loading vLLM...")
 llm = LLM(
     model=MODEL_ID,
     tensor_parallel_size=2,
-    dtype="float16",
+    dtype="bfloat16",
     gpu_memory_utilization=0.90,  # Leave headroom for Kaggle overhead
     max_model_len=608,  # 512 + 96
 )
