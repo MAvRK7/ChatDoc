@@ -6,13 +6,10 @@ from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 import json
 from tqdm import tqdm
-import os
-import multiprocessing as mp
 
 MODEL_ID = "google/gemma-2b-it"
 OUTPUT_FILE = "data/teacher_responses.jsonl"
-CHUNK_SIZE = 16
-
+CHUNK_SIZE =  64
 
 def main():
     os.makedirs("data", exist_ok=True)
@@ -35,18 +32,30 @@ def main():
 
             if user_text in seen:
                 continue
-
             seen.add(user_text)
 
             messages = [{"role": "user", "content": user_text}]
 
-            tokens = tokenizer.apply_chat_template(
+            # Tokenize to check length, but DON'T decode back
+            token_count = len(tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=True
-            )
+            ))
 
-            prompt = tokenizer.decode(tokens, skip_special_tokens=False)
+            if token_count > 700:
+                # Truncate the text itself, not tokens
+                # Rough heuristic: 3 chars per token for English
+                char_limit = int(700 * 3 * 0.8)  # safety margin
+                user_text = user_text[:char_limit]
+                messages = [{"role": "user", "content": user_text}]
+
+            # Pass STRING to vLLM — let vLLM tokenize correctly
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,  # ← String output
+                add_generation_prompt=True
+            )
 
             prompts.append(prompt)
 
@@ -56,37 +65,29 @@ def main():
         model=MODEL_ID,
         tensor_parallel_size=2,
         dtype="float16",
-        gpu_memory_utilization=0.60,
-        max_model_len=768,
-        enforce_eager=True
+        gpu_memory_utilization=0.85,  # ← T4s can handle 0.85 easily
+        max_model_len=768,  # 700 input + 64 output + padding headroom
+        enforce_eager=True,
     )
 
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        top_k=20,
+        top_k=50,  # ← 50 is standard, 20 is too restrictive
         max_tokens=64,
     )
 
     with open(OUTPUT_FILE, "w") as f_out:
         for i in tqdm(range(0, len(prompts), CHUNK_SIZE)):
             chunk = prompts[i:i + CHUNK_SIZE]
-
             outputs = llm.generate(chunk, sampling_params)
 
             for prompt, output in zip(chunk, outputs):
                 response = output.outputs[0].text.strip()
-
-                item = {
-                    "prompt": prompt,
-                    "response": response
-                }
-
+                item = {"prompt": prompt, "response": response}
                 f_out.write(json.dumps(item) + "\n")
 
     print(f"Done! Saved to {OUTPUT_FILE}")
 
-
 if __name__ == "__main__":
-    mp.freeze_support()
     main()
