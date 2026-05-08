@@ -35,7 +35,8 @@ model = MoETransformer(
     max_seq_len=1024,
 )
 
-state = torch.load("model.pt", map_location=device)
+#state = torch.load("model.pt", map_location=device)
+state = torch.load("checkpoints/model.pt/model.pt", map_location=device)
 model.load_state_dict(state["model"])
 model.to(device)
 model.eval()

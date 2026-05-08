@@ -300,4 +300,4 @@ if __name__ == "__main__":
     train()
 
 # run 
-# python -m src.train
+# python -m src.train.train
