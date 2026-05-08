@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 MODEL_ID = "google/gemma-2b-it"
 OUTPUT_FILE = "data/teacher_responses.jsonl"
-CHUNK_SIZE =  64
+CHUNK_SIZE =  700
 
 def main():
     os.makedirs("data", exist_ok=True)
