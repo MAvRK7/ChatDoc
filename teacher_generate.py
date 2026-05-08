@@ -40,11 +40,13 @@ def main():
 
             messages = [{"role": "user", "content": user_text}]
 
-            prompt = tokenizer.apply_chat_template(
+            tokens = tokenizer.apply_chat_template(
                 messages,
-                tokenize=False,
+                tokenize=True,
                 add_generation_prompt=True
             )
+
+            prompt = tokenizer.decode(tokens, skip_special_tokens=False)
 
             prompts.append(prompt)
 
@@ -55,7 +57,7 @@ def main():
         tensor_parallel_size=2,
         dtype="float16",
         gpu_memory_utilization=0.60,
-        max_model_len=256,
+        max_model_len=768,
         enforce_eager=True
     )
 
