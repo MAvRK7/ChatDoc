@@ -1,36 +1,42 @@
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
 import json
 import random
-from tqdm import tqdm
+from tqdm.auto import tqdm
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
+
+# =========================
+# CONFIG
+# =========================
 
 MODEL_ID = "google/gemma-2b-it"
 
 INPUT_FILE = "data/processed/train_formatted.jsonl"
-OUTPUT_FILE = "data/teacher_responses_50k.jsonl"
 
-CHUNK_SIZE = 700
+# Kaggle persistent output directory
+OUTPUT_DIR = "/kaggle/working/teacher_chunks"
+FINAL_OUTPUT = "/kaggle/working/teacher_responses_50k.jsonl"
+
 TARGET_EXAMPLES = 50_000
-
-# SAFE CONTEXT SETTINGS
-MAX_INPUT_TOKENS = 680
+MAX_INPUT_TOKENS = 680   # Leave headroom for template + output
 MAX_OUTPUT_TOKENS = 64
-MAX_MODEL_LEN = 768
 
+CHUNK_SIZE = 700         # vLLM batch size
+CHUNKS_PER_FILE = 10     # Write to disk every 10 vLLM chunks (~7K items)
+
+
+# =========================
+# BUILD PROMPTS
+# =========================
 
 def build_prompts(tokenizer):
-
     prompts = []
     seen = set()
 
-    with open(INPUT_FILE, "r") as f:
+    print("Loading + filtering prompts...")
 
-        for line in tqdm(f, desc="Building prompts"):
-
+    with open(INPUT_FILE, "r", encoding="utf-8") as f:
+        for line in tqdm(f):
             obj = json.loads(line)
             text = obj.get("text", "")
 
@@ -43,86 +49,91 @@ def build_prompts(tokenizer):
             if not user_text:
                 continue
 
-            # Remove duplicates
+            # Deduplicate
             if user_text in seen:
                 continue
-
             seen.add(user_text)
 
-            # Tokenize raw user text
-            user_tokens = tokenizer.encode(
-                user_text,
-                add_special_tokens=False
+            messages = [{"role": "user", "content": user_text}]
+
+            # Tokenize to check length
+            tokens = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True
             )
 
-            # Leave room for template overhead
-            max_user_tokens = MAX_INPUT_TOKENS - 10
+            # HARD TRUNCATE: slice tokens, decode, rebuild
+            if len(tokens) > MAX_INPUT_TOKENS:
+                # Leave room for template overhead
+                safe_limit = MAX_INPUT_TOKENS - 10
+                tokens = tokens[:safe_limit]
 
-            if len(user_tokens) > max_user_tokens:
+                # Decode back to raw text
+                decoded = tokenizer.decode(tokens, skip_special_tokens=True)
 
-                user_tokens = user_tokens[:max_user_tokens]
+                # Extract user content from Gemma template debris
+                # Template wraps as: <start_of_turn>user\n{content}<end_of_turn>
+                if "user" in decoded:
+                    # Strip template markers
+                    cleaned = decoded.replace("<start_of_turn>", "").replace("<end_of_turn>", "")
+                    if "user\n" in cleaned:
+                        user_text = cleaned.split("user\n", 1)[1].strip()
+                    else:
+                        user_text = cleaned.strip()
+                else:
+                    user_text = decoded.strip()
 
-                user_text = tokenizer.decode(
-                    user_tokens,
-                    skip_special_tokens=True
-                )
+                messages = [{"role": "user", "content": user_text}]
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": user_text
-                }
-            ]
-
-            # Build final chat-formatted prompt
+            # Build final prompt string
             prompt = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True
             )
 
-            # Final verification
-            final_len = len(
-                tokenizer.encode(
-                    prompt,
-                    add_special_tokens=False
-                )
+            # SAFETY CHECK: skip if still too long (shouldn't happen)
+            final_tokens = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True
             )
-
-            # Skip edge cases
-            if final_len > MAX_INPUT_TOKENS:
+            if len(final_tokens) > MAX_INPUT_TOKENS:
                 continue
 
             prompts.append(prompt)
 
     print(f"\nTotal unique prompts available: {len(prompts):,}")
-
     return prompts
 
 
+# =========================
+# MAIN
+# =========================
+
 def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    os.makedirs("data", exist_ok=True)
-
+    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
     prompts = build_prompts(tokenizer)
 
-    # Deterministic shuffle
+    # Deterministic shuffle for diversity
     random.seed(42)
     random.shuffle(prompts)
-
-    # Limit dataset size
     prompts = prompts[:TARGET_EXAMPLES]
 
-    print(f"Using {len(prompts):,} prompts")
+    print(f"\nUsing {len(prompts):,} prompts for generation")
 
+    print("\nLoading vLLM model...")
     llm = LLM(
         model=MODEL_ID,
         tensor_parallel_size=2,
         dtype="float16",
         gpu_memory_utilization=0.85,
-        max_model_len=MAX_MODEL_LEN,
+        max_model_len=768,
         enforce_eager=True,
     )
 
@@ -133,51 +144,65 @@ def main():
         max_tokens=MAX_OUTPUT_TOKENS,
     )
 
-    with open(OUTPUT_FILE, "w") as f_out:
+    total_chunks = (len(prompts) + CHUNK_SIZE - 1) // CHUNK_SIZE
+    file_idx = 0
+    items_buffer = []
+    total_generated = 0
 
-        for i in tqdm(
-            range(0, len(prompts), CHUNK_SIZE),
-            desc="Generating"
-        ):
+    print("\nStarting generation...")
 
-            chunk = prompts[i:i + CHUNK_SIZE]
+    for chunk_num in tqdm(range(total_chunks), desc="Generating"):
+        start = chunk_num * CHUNK_SIZE
+        chunk = prompts[start:start + CHUNK_SIZE]
 
-            # EXTRA SAFETY VALIDATION
-            validated_chunk = []
+        outputs = llm.generate(chunk, sampling_params)
 
-            for prompt in chunk:
+        for prompt, output in zip(chunk, outputs):
+            response = output.outputs[0].text.strip()
+            items_buffer.append({
+                "prompt": prompt,
+                "response": response
+            })
+            total_generated += 1
 
-                tok_len = len(
-                    tokenizer.encode(
-                        prompt,
-                        add_special_tokens=False
-                    )
-                )
+        # FLUSH TO DISK every N chunks
+        if (chunk_num + 1) % CHUNKS_PER_FILE == 0 or chunk_num == total_chunks - 1:
+            filepath = os.path.join(OUTPUT_DIR, f"chunk_{file_idx:04d}.jsonl")
 
-                # Ensure prompt + generation fit model context
-                if tok_len + MAX_OUTPUT_TOKENS <= MAX_MODEL_LEN:
-                    validated_chunk.append(prompt)
+            with open(filepath, "w", encoding="utf-8") as f:
+                for item in items_buffer:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())  # Force physical write to disk
 
-            if not validated_chunk:
-                continue
+            # VERIFY
+            file_size = os.path.getsize(filepath)
+            if file_size < 100:
+                raise RuntimeError(f"File write failed: {filepath} ({file_size} bytes)")
 
-            outputs = llm.generate(
-                validated_chunk,
-                sampling_params
-            )
+            print(f"  Saved {filepath} ({len(items_buffer)} items, {file_size:,} bytes)")
+            items_buffer = []
+            file_idx += 1
 
-            for prompt, output in zip(validated_chunk, outputs):
+    # MERGE CHUNKS
+    print(f"\nMerging {file_idx} chunks into final file...")
+    with open(FINAL_OUTPUT, "w", encoding="utf-8") as fout:
+        for i in range(file_idx):
+            chunk_path = os.path.join(OUTPUT_DIR, f"chunk_{i:04d}.jsonl")
+            with open(chunk_path, "r", encoding="utf-8") as fin:
+                fout.write(fin.read())
 
-                response = output.outputs[0].text.strip()
+    # VERIFY FINAL
+    final_size = os.path.getsize(FINAL_OUTPUT)
+    print(f"\nFinal file: {FINAL_OUTPUT}")
+    print(f"Size: {final_size:,} bytes")
+    print(f"Total examples: {total_generated:,}")
 
-                item = {
-                    "prompt": prompt,
-                    "response": response
-                }
-
-                f_out.write(json.dumps(item) + "\n")
-
-    print(f"\nDone! Saved to {OUTPUT_FILE}")
+    # Quick sanity check
+    with open(FINAL_OUTPUT, "r", encoding="utf-8") as f:
+        first_line = json.loads(f.readline())
+        print(f"\nFirst prompt (truncated): {first_line['prompt'][:100]}...")
+        print(f"First response (truncated): {first_line['response'][:100]}...")
 
 
 if __name__ == "__main__":
