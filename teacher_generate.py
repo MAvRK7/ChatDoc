@@ -2,31 +2,35 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer
 import json
 import random
-from tqdm.auto import tqdm
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
+from tqdm import tqdm
 
 MODEL_ID = "google/gemma-2b-it"
 
 INPUT_FILE = "data/processed/train_formatted.jsonl"
 OUTPUT_FILE = "data/teacher_responses_50k.jsonl"
 
-TARGET_EXAMPLES = 50_000
-MAX_INPUT_TOKENS = 700
-MAX_OUTPUT_TOKENS = 64
-
 CHUNK_SIZE = 700
+TARGET_EXAMPLES = 50_000
+
+# SAFE CONTEXT SETTINGS
+MAX_INPUT_TOKENS = 680
+MAX_OUTPUT_TOKENS = 64
+MAX_MODEL_LEN = 768
+
 
 def build_prompts(tokenizer):
+
     prompts = []
     seen = set()
 
-    print("Loading + filtering prompts...")
-
     with open(INPUT_FILE, "r") as f:
-        for line in tqdm(f):
+
+        for line in tqdm(f, desc="Building prompts"):
+
             obj = json.loads(line)
             text = obj.get("text", "")
 
@@ -39,11 +43,29 @@ def build_prompts(tokenizer):
             if not user_text:
                 continue
 
-            # Deduplicate
+            # Remove duplicates
             if user_text in seen:
                 continue
 
             seen.add(user_text)
+
+            # Tokenize raw user text
+            user_tokens = tokenizer.encode(
+                user_text,
+                add_special_tokens=False
+            )
+
+            # Leave room for template overhead
+            max_user_tokens = MAX_INPUT_TOKENS - 10
+
+            if len(user_tokens) > max_user_tokens:
+
+                user_tokens = user_tokens[:max_user_tokens]
+
+                user_text = tokenizer.decode(
+                    user_tokens,
+                    skip_special_tokens=True
+                )
 
             messages = [
                 {
@@ -52,35 +74,24 @@ def build_prompts(tokenizer):
                 }
             ]
 
-            # Count tokens
-            token_count = len(
-                tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=True
-                )
-            )
-
-            # Truncate if needed
-            if token_count > MAX_INPUT_TOKENS:
-
-                # ~4 chars/token heuristic for English
-                char_limit = int(MAX_INPUT_TOKENS * 4)
-
-                user_text = user_text[:char_limit]
-
-                messages = [
-                    {
-                        "role": "user",
-                        "content": user_text
-                    }
-                ]
-
+            # Build final chat-formatted prompt
             prompt = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True
             )
+
+            # Final verification
+            final_len = len(
+                tokenizer.encode(
+                    prompt,
+                    add_special_tokens=False
+                )
+            )
+
+            # Skip edge cases
+            if final_len > MAX_INPUT_TOKENS:
+                continue
 
             prompts.append(prompt)
 
@@ -88,10 +99,11 @@ def build_prompts(tokenizer):
 
     return prompts
 
+
 def main():
+
     os.makedirs("data", exist_ok=True)
 
-    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
     prompts = build_prompts(tokenizer)
@@ -100,19 +112,17 @@ def main():
     random.seed(42)
     random.shuffle(prompts)
 
-    # Limit to 50k
+    # Limit dataset size
     prompts = prompts[:TARGET_EXAMPLES]
 
-    print(f"\nUsing {len(prompts):,} prompts for generation")
-
-    print("\nLoading vLLM model...")
+    print(f"Using {len(prompts):,} prompts")
 
     llm = LLM(
         model=MODEL_ID,
         tensor_parallel_size=2,
         dtype="float16",
         gpu_memory_utilization=0.85,
-        max_model_len=768,
+        max_model_len=MAX_MODEL_LEN,
         enforce_eager=True,
     )
 
@@ -123,44 +133,52 @@ def main():
         max_tokens=MAX_OUTPUT_TOKENS,
     )
 
-    total_chunks = (len(prompts) + CHUNK_SIZE - 1) // CHUNK_SIZE
-
-    print("\nStarting generation...")
-
-    generated = 0
-
     with open(OUTPUT_FILE, "w") as f_out:
 
         for i in tqdm(
             range(0, len(prompts), CHUNK_SIZE),
-            total=total_chunks,
             desc="Generating"
         ):
 
             chunk = prompts[i:i + CHUNK_SIZE]
 
-            outputs = llm.generate(chunk, sampling_params)
+            # EXTRA SAFETY VALIDATION
+            validated_chunk = []
 
-            for prompt, output in zip(chunk, outputs):
+            for prompt in chunk:
 
-                try:
-                    response = output.outputs[0].text.strip()
+                tok_len = len(
+                    tokenizer.encode(
+                        prompt,
+                        add_special_tokens=False
+                    )
+                )
 
-                    item = {
-                        "prompt": prompt,
-                        "response": response
-                    }
+                # Ensure prompt + generation fit model context
+                if tok_len + MAX_OUTPUT_TOKENS <= MAX_MODEL_LEN:
+                    validated_chunk.append(prompt)
 
-                    f_out.write(json.dumps(item, ensure_ascii=False) + "\n")
+            if not validated_chunk:
+                continue
 
-                    generated += 1
+            outputs = llm.generate(
+                validated_chunk,
+                sampling_params
+            )
 
-                except Exception as e:
-                    print(f"Skipping failed output: {e}")
+            for prompt, output in zip(validated_chunk, outputs):
 
-    print(f"\nDone!")
-    print(f"Generated examples: {generated:,}")
-    print(f"Saved to: {OUTPUT_FILE}")
+                response = output.outputs[0].text.strip()
+
+                item = {
+                    "prompt": prompt,
+                    "response": response
+                }
+
+                f_out.write(json.dumps(item) + "\n")
+
+    print(f"\nDone! Saved to {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
     main()
