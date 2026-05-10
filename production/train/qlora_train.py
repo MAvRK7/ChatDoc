@@ -205,28 +205,39 @@ training_args = TrainingArguments(
     bf16=True,
     optim="paged_adamw_8bit",
     report_to="tensorboard",
-    # FIX: Use logging_dir here, but ensure the trainer accepts it via args
-    logging_dir=Config.log_dir, 
+    logging_dir=Config.log_dir,
     ddp_find_unused_parameters=False,
+    # Added this to avoid the warning you saw earlier
+    remove_unused_columns=False 
 )
+
+# Robust formatting function for SFTTrainer
+def formatting_prompts_func(example):
+    output_texts = []
+    for i in range(len(example['text'])):
+        output_texts.append(example['text'][i])
+    return output_texts
+
+# Ensure padding side is correct for training
+tokenizer.padding_side = "right"
 
 trainer = SFTTrainer(
     model=model,
-    # FIX: Change 'tokenizer' to 'processing_class'
     processing_class=tokenizer, 
     train_dataset=combined,
-    dataset_text_field="text",
+    formatting_func=formatting_prompts_func,
     max_seq_length=Config.max_length,
     args=training_args,
     packing=False,
-    # Ensure group_by_length is in TrainingArguments if preferred, 
-    # but keeping it in dataset_kwargs is fine for SFTTrainer
-    dataset_kwargs={"group_by_length": True},
+    dataset_kwargs={
+        "add_special_tokens": False,  
+        "append_concat_token": False,
+    },
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
 )
 
 print("Starting training...")
-trainer.train()
+trainer.train() 
 
 # =========================
 # 7. SAVE
