@@ -82,33 +82,33 @@ tokenizer.padding_side = "right"
 # 3. LoRA SETUP (Fixed for Gemma 4)
 # =========================
 
-# 1. Update target_modules: Gemma 4 names these slightly differently 
-# in the multimodal-native architecture.
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    target_modules=[
-        "q_proj", "v_proj" # Start with just these to bypass metadata errors
-    ],
+    target_modules=["q_proj", "v_proj"], 
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
 )
 
-print("Initializing Peft Model with Gemma 4 workaround...")
+print("Applying deep patch for Gemma 4 native layers...")
 
-# FIX: Manually patch the target layers before calling get_peft_model
-# This adds the missing metadata that PEFT is looking for.
+# This patch provides the metadata PEFT expects from BitsAndBytes
 for name, module in model.named_modules():
     if any(target in name for target in lora_config.target_modules):
-        if hasattr(module, "weight") and not hasattr(module.weight, "compress_statistics"):
-            # Provide dummy metadata to satisfy the PEFT dispatcher
-            module.weight.compress_statistics = None
-            module.weight.quant_state = None
+        if hasattr(module, "weight"):
+            # Deep patch to satisfy the PEFT dispatcher
+            if not hasattr(module.weight, "compress_statistics"):
+                module.weight.compress_statistics = None
+            if not hasattr(module.weight, "quant_type"):
+                module.weight.quant_type = "nf4" # Fake it so dispatcher continues
+            if not hasattr(module.weight, "quant_state"):
+                module.weight.quant_state = None
 
+print("Initializing Peft Model...")
 model = get_peft_model(model, lora_config)
 
-# Manual preparation: convert ONLY trainable params to BF16
+# Manual preparation: convert LoRA weights to BF16
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
