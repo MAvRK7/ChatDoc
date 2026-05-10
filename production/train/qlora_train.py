@@ -49,36 +49,38 @@ class Config:
 # 2. LOAD MODEL (4-bit)
 # =========================
 print("Loading Gemma 4-E2B...")
+from peft import prepare_model_for_kbit_training # Add this import
+
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.bfloat16,
     bnb_4bit_use_double_quant=True,
-    # SKIP the problematic projection layers
     llm_int8_skip_modules=["per_layer_model_projection", "per_layer_projection"]
 )
 
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto", # Changed from balanced to auto
+    device_map="auto", # Let transformers handle the placement
     torch_dtype=torch.bfloat16,
     attn_implementation="sdpa",
     trust_remote_code=True
 )
 
-# Move the whole model to GPU explicitly to fix the "not initialized" warning
-model.to("cuda")
+# REPLACED model.to("cuda") with this:
+model = prepare_model_for_kbit_training(model)
 
 # FIX: Modern checkpointing & text-only mode
 model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 model.config.use_cache = False
-model.config.vision_config = None 
+model.config.vision_config = None
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 tokenizer = processor.tokenizer
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
+tokenizer.model_max_length = Config.max_length
 
 # =========================
 # 3. LoRA SETUP
