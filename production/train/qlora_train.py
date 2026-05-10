@@ -49,7 +49,7 @@ class Config:
 # 2. LOAD MODEL (4-bit)
 # =========================
 print("Loading Gemma 4-E2B...")
-from peft import prepare_model_for_kbit_training # Add this import
+# REMOVE the import of prepare_model_for_kbit_training
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -62,19 +62,25 @@ bnb_config = BitsAndBytesConfig(
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto", # Let transformers handle the placement
+    device_map="auto", 
     torch_dtype=torch.bfloat16,
     attn_implementation="sdpa",
     trust_remote_code=True
 )
 
-# REPLACED model.to("cuda") with this:
-model = prepare_model_for_kbit_training(model)
-
-# FIX: Modern checkpointing & text-only mode
+# --- MANUAL PREPARATION (Replaces the OOM-causing function) ---
+# 1. Enable gradient checkpointing manually
 model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+# 2. Keep inputs/embeds in bf16 instead of casting to fp32
+def make_inputs_require_grad(module, input, output):
+    output.requires_grad_(True)
+model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
+# 3. Standard config fixes
 model.config.use_cache = False
-model.config.vision_config = None
+model.config.vision_config = None 
+# --------------------------------------------------------------
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 tokenizer = processor.tokenizer
