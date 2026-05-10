@@ -7,7 +7,8 @@ from transformers import (
     AutoProcessor,
     TrainingArguments,
     BitsAndBytesConfig,
-    TrainerCallback
+    TrainerCallback,
+    Gemma4ForCausalLM
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
@@ -57,12 +58,13 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True,
 )
 
-model = AutoModelForCausalLM.from_pretrained(
+model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
     device_map="auto",
     torch_dtype=torch.bfloat16,
     attn_implementation="sdpa",
+    trust_remote_code=True
 )
 model.config.use_cache = False
 
