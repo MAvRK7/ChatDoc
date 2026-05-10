@@ -200,6 +200,10 @@ class GenerateTextCallback(TrainerCallback):
                 )
                 text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
                 print(f"\n=== Sample generation at step {state.global_step:,} ===\n{text}\n")
+            
+# =========================
+# 6. TRAINING
+# =========================
 
 sft_config = SFTConfig(
     output_dir=Config.output_dir,
@@ -217,7 +221,10 @@ sft_config = SFTConfig(
     bf16=True,
     optim="paged_adamw_8bit",
     report_to="tensorboard",
-    logging_dir=Config.log_dir,
+    # logging_dir=Config.log_dir,  # <-- REMOVE THIS (deprecated)
+    max_seq_length=Config.max_length,      # <-- ADD HERE
+    packing=False,                          # <-- ADD HERE
+    dataset_text_field="text",              # <-- ADD HERE
 )
 
 trainer = SFTTrainer(
@@ -225,10 +232,8 @@ trainer = SFTTrainer(
     args=sft_config,
     train_dataset=combined,
     processing_class=tokenizer,
-    max_seq_length=Config.max_length,      # <-- moved here
-    packing=False,                          # <-- moved here
-    dataset_text_field="text",              # <-- moved here
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
+    # REMOVE: max_seq_length, packing, dataset_text_field from here
 )
 
 # Note: We removed 'formatting_func' because 'dataset_text_field' inside 
