@@ -190,8 +190,7 @@ class GenerateTextCallback(TrainerCallback):
 # 6. TRAINING
 # =========================
 
-# Use SFTConfig instead of TrainingArguments to pass SFT-specific parameters
-training_args = SFTConfig(
+training_args = TrainingArguments(
     output_dir=Config.output_dir,
     max_steps=Config.max_steps,
     per_device_train_batch_size=Config.batch_size,
@@ -209,13 +208,10 @@ training_args = SFTConfig(
     report_to="tensorboard",
     logging_dir=Config.log_dir,
     ddp_find_unused_parameters=False,
-    # FIX: max_seq_length is now passed here in SFTConfig
-    max_seq_length=Config.max_length,
-    # Packing also goes here now
-    packing=False,
-    dataset_text_field="text", # If using formatting_func, this is often ignored but good to have
+    remove_unused_columns=False,
 )
 
+# Robust formatting: SFTTrainer likes a list of strings for the batch
 def formatting_prompts_func(example):
     return example["text"]
 
@@ -225,12 +221,18 @@ trainer = SFTTrainer(
     train_dataset=combined,
     processing_class=tokenizer,
     formatting_func=formatting_prompts_func,
-    # Removed max_seq_length and packing from here
+    # FIX: We pass max_seq_length here. 
+    # If this still errors, the trainer is defaulting to the model's max length.
+    max_seq_length=Config.max_length, 
     dataset_kwargs={
         "add_special_tokens": False,
     },
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
 )
+
+# If you get "unexpected argument max_seq_length" AGAIN, 
+# DELETE the line "max_seq_length=Config.max_length," above.
+# The trainer will then automatically use the model's default length.
 
 print("Starting training...")
 trainer.train()
