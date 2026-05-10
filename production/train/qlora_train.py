@@ -218,18 +218,16 @@ sft_config = SFTConfig(
     optim="paged_adamw_8bit",
     report_to="tensorboard",
     logging_dir=Config.log_dir,
-    # These were causing the TypeErrors when passed to SFTTrainer
-    max_seq_length=Config.max_length,
-    packing=False,
-    dataset_text_field="text", # Points to your mapped 'text' column
 )
 
-# Initialize trainer with ONLY the absolute essentials
 trainer = SFTTrainer(
     model=model,
     args=sft_config,
     train_dataset=combined,
     processing_class=tokenizer,
+    max_seq_length=Config.max_length,      # <-- moved here
+    packing=False,                          # <-- moved here
+    dataset_text_field="text",              # <-- moved here
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
 )
 
