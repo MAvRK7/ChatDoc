@@ -49,13 +49,13 @@ class Config:
 # 2. LOAD MODEL (4-bit)
 # =========================
 print("Loading Gemma 4-E2B...")
-# REMOVE the import of prepare_model_for_kbit_training
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.bfloat16,
     bnb_4bit_use_double_quant=True,
+    # Skip the layers that break quantization shapes
     llm_int8_skip_modules=["per_layer_model_projection", "per_layer_projection"]
 )
 
@@ -68,19 +68,18 @@ model = Gemma4ForCausalLM.from_pretrained(
     trust_remote_code=True
 )
 
-# --- MANUAL PREPARATION (Replaces the OOM-causing function) ---
-# 1. Enable gradient checkpointing manually
+# --- MANUAL PREP (Avoids OOM of prepare_model_for_kbit_training) ---
 model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-# 2. Keep inputs/embeds in bf16 instead of casting to fp32
+# This is the secret sauce: 
+# Manually tell the model to treat input embeddings as needing gradients 
+# without casting the whole model to float32.
 def make_inputs_require_grad(module, input, output):
     output.requires_grad_(True)
 model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
-# 3. Standard config fixes
 model.config.use_cache = False
 model.config.vision_config = None 
-# --------------------------------------------------------------
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 tokenizer = processor.tokenizer
@@ -94,22 +93,21 @@ tokenizer.model_max_length = Config.max_length
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    # ONLY target standard attention layers
     target_modules=["q_proj", "v_proj", "k_proj", "o_proj"], 
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
 )
 
+# Important: We apply LoRA BEFORE any manual casting to keep bnb attributes intact
 model = get_peft_model(model, lora_config)
 
-# Manual preparation & weight tying
+# Ensure the LoRA weights themselves are in bf16
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
         param.data = param.data.to(torch.bfloat16)
 
-model.tie_weights() # FIX: Keeps GPUs in sync
 model.print_trainable_parameters()
 
 # =========================
