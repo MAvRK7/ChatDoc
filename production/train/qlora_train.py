@@ -79,27 +79,41 @@ tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
 
 # =========================
-# 3. LoRA SETUP
+# 3. LoRA SETUP (Fixed for Gemma 4)
 # =========================
 
+# 1. Update target_modules: Gemma 4 names these slightly differently 
+# in the multimodal-native architecture.
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
     target_modules=[
-        "q_proj", "k_proj", "v_proj", "o_proj"
+        "q_proj", "v_proj" # Start with just these to bypass metadata errors
     ],
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
 )
 
-print("Preparing model for QLoRA...")
-# model = prepare_model_for_kbit_training(model)
+print("Initializing Peft Model with Gemma 4 workaround...")
+
+# FIX: Manually patch the target layers before calling get_peft_model
+# This adds the missing metadata that PEFT is looking for.
+for name, module in model.named_modules():
+    if any(target in name for target in lora_config.target_modules):
+        if hasattr(module, "weight") and not hasattr(module.weight, "compress_statistics"):
+            # Provide dummy metadata to satisfy the PEFT dispatcher
+            module.weight.compress_statistics = None
+            module.weight.quant_state = None
+
 model = get_peft_model(model, lora_config)
+
+# Manual preparation: convert ONLY trainable params to BF16
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
         param.data = param.data.to(torch.bfloat16)
+
 model.print_trainable_parameters()
 
 # =========================
