@@ -1,5 +1,6 @@
 # production/train/qlora_train.py
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import math
 import torch
 from transformers import (
@@ -42,7 +43,7 @@ class Config:
     log_every = 25
     
     # LoRA
-    lora_r = 64
+    lora_r = 32
     lora_alpha = 16
     lora_dropout = 0.05
 
@@ -66,6 +67,7 @@ model = Gemma4ForCausalLM.from_pretrained(
     attn_implementation="sdpa",
     trust_remote_code=True
 )
+model.gradient_checkpointing_enable()
 model.config.use_cache = False
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
@@ -92,6 +94,9 @@ lora_config = LoraConfig(
 print("Preparing model for QLoRA...")
 model = prepare_model_for_kbit_training(model)
 model = get_peft_model(model, lora_config)
+for param in model.parameters():
+    if param.requires_grad:
+        param.data = param.data.to(torch.bfloat16)
 model.print_trainable_parameters()
 
 # =========================
