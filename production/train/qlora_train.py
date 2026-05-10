@@ -54,16 +54,21 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.bfloat16,
     bnb_4bit_use_double_quant=True,
+    # SKIP the problematic projection layers
+    llm_int8_skip_modules=["per_layer_model_projection", "per_layer_projection"]
 )
 
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="balanced",
+    device_map="auto", # Changed from balanced to auto
     torch_dtype=torch.bfloat16,
     attn_implementation="sdpa",
     trust_remote_code=True
 )
+
+# Move the whole model to GPU explicitly to fix the "not initialized" warning
+model.to("cuda")
 
 # FIX: Modern checkpointing & text-only mode
 model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -81,22 +86,12 @@ tokenizer.padding_side = "right"
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    target_modules=["q_proj", "v_proj"], 
+    # ONLY target standard attention layers
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"], 
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
 )
-
-# Deep patch for Gemma 4 native layers
-for name, module in model.named_modules():
-    if any(target in name for target in lora_config.target_modules):
-        if hasattr(module, "weight"):
-            if not hasattr(module.weight, "compress_statistics"):
-                module.weight.compress_statistics = None
-            if not hasattr(module.weight, "quant_type"):
-                module.weight.quant_type = "nf4"
-            if not hasattr(module.weight, "quant_state"):
-                module.weight.quant_state = None
 
 model = get_peft_model(model, lora_config)
 
