@@ -86,8 +86,7 @@ lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
     target_modules=[
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj"
+        "q_proj", "k_proj", "v_proj", "o_proj"
     ],
     lora_dropout=Config.lora_dropout,
     bias="none",
