@@ -221,10 +221,8 @@ sft_config = SFTConfig(
     bf16=True,
     optim="paged_adamw_8bit",
     report_to="tensorboard",
-    # logging_dir=Config.log_dir,  # <-- REMOVE THIS (deprecated)
-    max_seq_length=Config.max_length,      # <-- ADD HERE
-    packing=False,                          # <-- ADD HERE
-    dataset_text_field="text",              # <-- ADD HERE
+    dataset_text_field="text",
+    # NOTHING ELSE — no max_seq_length, no packing
 )
 
 trainer = SFTTrainer(
@@ -233,7 +231,7 @@ trainer = SFTTrainer(
     train_dataset=combined,
     processing_class=tokenizer,
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
-    # REMOVE: max_seq_length, packing, dataset_text_field from here
+    # NO max_seq_length here either
 )
 
 # Note: We removed 'formatting_func' because 'dataset_text_field' inside 
