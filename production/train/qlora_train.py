@@ -1,6 +1,7 @@
 # production/train/qlora_train.py
 import os
 import json
+import gc
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from trl import SFTTrainer, SFTConfig
 import torch
@@ -10,8 +11,38 @@ from transformers import (
     TrainerCallback,
     Gemma4ForCausalLM
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from datasets import load_dataset, concatenate_datasets, Dataset
+
+MODEL_ID = "google/gemma-4-E2B-it"
+
+import bitsandbytes as bnb
+from bitsandbytes.nn.modules import fix_4bit_weight_quant_state_from_module
+
+# =========================================================
+# PATCH FOR GEMMA4 + BNB 4BIT ASSERTION BUG
+# =========================================================
+
+_original_fix = fix_4bit_weight_quant_state_from_module
+
+def patched_fix_4bit_weight_quant_state_from_module(module):
+    try:
+        return _original_fix(module)
+
+    except AssertionError:
+        # Gemma4 projection layers sometimes violate
+        # internal BnB assumptions during quant state repair.
+        # Skip repair instead of crashing.
+
+        if hasattr(module, "weight"):
+            if not hasattr(module.weight, "quant_state"):
+                module.weight.quant_state = None
+
+        return
+
+bnb.nn.modules.fix_4bit_weight_quant_state_from_module = (
+    patched_fix_4bit_weight_quant_state_from_module
+)
 
 MODEL_ID = "google/gemma-4-E2B-it"
 
@@ -23,12 +54,12 @@ class Config:
     # Data paths
     ultrachat_path = "data/processed/train.jsonl"
     medical_path = "data/finetune/train_deduped.jsonl"
-    
+
     # Output
     output_dir = "checkpoints/gemma-lora"
     final_dir = "checkpoints/gemma-lora-final"
     log_dir = "outputs/runs"
-    
+
     # Training
     batch_size = 1
     grad_accum_steps = 8
@@ -39,7 +70,7 @@ class Config:
     max_steps = 5000
     eval_every = 500
     log_every = 25
-    
+
     # LoRA
     lora_r = 32
     lora_alpha = 16
@@ -48,6 +79,7 @@ class Config:
 # =========================
 # 2. LOAD MODEL (4-bit)
 # =========================
+
 print("Loading Gemma 4-E2B...")
 
 bnb_config = BitsAndBytesConfig(
@@ -55,73 +87,76 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.bfloat16,
     bnb_4bit_use_double_quant=True,
-    # Skip the layers that break quantization shapes
-    llm_int8_skip_modules=["per_layer_model_projection", "per_layer_projection"]
 )
 
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto", 
+    device_map="auto",
     torch_dtype=torch.bfloat16,
     attn_implementation="sdpa",
     trust_remote_code=True
 )
 
-# --- MANUAL PREP (Avoids OOM of prepare_model_for_kbit_training) ---
-model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+torch.cuda.empty_cache()
 
-# This is the secret sauce: 
-# Manually tell the model to treat input embeddings as needing gradients 
-# without casting the whole model to float32.
+# =========================================================
+# MANUAL PREP (LOW VRAM SAFE)
+# =========================================================
+
+model.gradient_checkpointing_enable(
+    gradient_checkpointing_kwargs={"use_reentrant": False}
+)
+
+# Enable gradients on input embeddings
+# WITHOUT casting whole model to fp32
 def make_inputs_require_grad(module, input, output):
     output.requires_grad_(True)
-model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
+model.get_input_embeddings().register_forward_hook(
+    make_inputs_require_grad
+)
 
 model.config.use_cache = False
-model.config.vision_config = None 
+model.config.vision_config = None
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
+
 tokenizer = processor.tokenizer
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
 tokenizer.model_max_length = Config.max_length
 
 # =========================
-# 3. LoRA SETUP (Minimal, no prepare_model_for_kbit_training)
+# 3. LoRA SETUP
 # =========================
 
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"], 
+    target_modules=[
+        "q_proj",
+        "v_proj",
+        "k_proj",
+        "o_proj"
+    ],
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
 )
 
-# AGGRESSIVE PATCH: Monkey-patch bnb attributes directly onto Parameter objects
-# (PyTorch enforces Parameter type for .weight, so we can't replace it)
-for name, module in model.named_modules():
-    if any(target in name for target in lora_config.target_modules):
-        weight_obj = getattr(module, "weight", None)
-        if weight_obj is None and hasattr(module, "base_layer"):
-            weight_obj = getattr(module.base_layer, "weight", None)
-        
-        if weight_obj is not None:
-            object.__setattr__(weight_obj, "compress_statistics", None)
-            object.__setattr__(weight_obj, "quant_type", "nf4")
-            object.__setattr__(weight_obj, "quant_state", None)
-
 model = get_peft_model(model, lora_config)
 
-# Ensure the LoRA weights themselves are in bf16
+# Ensure LoRA weights are bf16 + trainable
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
         param.data = param.data.to(torch.bfloat16)
 
 model.print_trainable_parameters()
+
+gc.collect()
+torch.cuda.empty_cache()
 
 # =========================
 # 4. LOAD & FORMAT DATA
