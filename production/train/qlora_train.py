@@ -205,18 +205,22 @@ training_args = TrainingArguments(
     bf16=True,
     optim="paged_adamw_8bit",
     report_to="tensorboard",
-    logging_dir=Config.log_dir,
+    # FIX: Use logging_dir here, but ensure the trainer accepts it via args
+    logging_dir=Config.log_dir, 
     ddp_find_unused_parameters=False,
 )
 
 trainer = SFTTrainer(
     model=model,
-    tokenizer=tokenizer,
+    # FIX: Change 'tokenizer' to 'processing_class'
+    processing_class=tokenizer, 
     train_dataset=combined,
     dataset_text_field="text",
     max_seq_length=Config.max_length,
     args=training_args,
     packing=False,
+    # Ensure group_by_length is in TrainingArguments if preferred, 
+    # but keeping it in dataset_kwargs is fine for SFTTrainer
     dataset_kwargs={"group_by_length": True},
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
 )
