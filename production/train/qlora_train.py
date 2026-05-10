@@ -1,17 +1,17 @@
 # production/train/qlora_train.py
 import os
+import json
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from trl import SFTTrainer, SFTConfig
 import torch
 from transformers import (
     AutoProcessor,
-    TrainingArguments,
     BitsAndBytesConfig,
     TrainerCallback,
     Gemma4ForCausalLM
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from datasets import load_dataset, concatenate_datasets
+from peft import LoraConfig, get_peft_model
+from datasets import load_dataset, concatenate_datasets, Dataset
 
 MODEL_ID = "google/gemma-4-E2B-it"
 
@@ -144,8 +144,23 @@ def format_medical(example):
     )
     return {"text": text}
 
-print("Loading UltraChat...")
-ultrachat = load_dataset("json", data_files=Config.ultrachat_path, split="train")
+def load_jsonl_safe(path):
+    """Load JSONL, skipping malformed lines and reporting them."""
+    data = []
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                print(f"⚠️  Skipping bad line {i}: {e}")
+    return data
+
+print("Loading UltraChat (with bad-line recovery)...")
+raw_data = load_jsonl_safe(Config.ultrachat_path)
+ultrachat = Dataset.from_list(raw_data)
 ultrachat = ultrachat.map(format_ultrachat, remove_columns=ultrachat.column_names)
 
 print("Loading medical data...")
