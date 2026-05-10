@@ -134,16 +134,24 @@ tokenizer.model_max_length = Config.max_length
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    target_modules=[
-        "q_proj",
-        "v_proj",
-        "k_proj",
-        "o_proj"
-    ],
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
 )
+
+# PATCH: Add missing bnb attributes to all target module weights
+# BEFORE get_peft_model tries to read them
+for name, module in model.named_modules():
+    if any(target in name for target in lora_config.target_modules):
+        weight_obj = getattr(module, "weight", None)
+        if weight_obj is None and hasattr(module, "base_layer"):
+            weight_obj = getattr(module.base_layer, "weight", None)
+        
+        if weight_obj is not None:
+            object.__setattr__(weight_obj, "compress_statistics", None)
+            object.__setattr__(weight_obj, "quant_type", "nf4")
+            object.__setattr__(weight_obj, "quant_state", None)
 
 model = get_peft_model(model, lora_config)
 
