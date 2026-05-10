@@ -1,6 +1,7 @@
 # production/train/qlora_train.py
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+from trl import SFTTrainer, SFTConfig
 import torch
 from transformers import (
     AutoProcessor,
@@ -189,7 +190,8 @@ class GenerateTextCallback(TrainerCallback):
 # 6. TRAINING
 # =========================
 
-training_args = TrainingArguments(
+# Use SFTConfig instead of TrainingArguments to pass SFT-specific parameters
+training_args = SFTConfig(
     output_dir=Config.output_dir,
     max_steps=Config.max_steps,
     per_device_train_batch_size=Config.batch_size,
@@ -207,37 +209,31 @@ training_args = TrainingArguments(
     report_to="tensorboard",
     logging_dir=Config.log_dir,
     ddp_find_unused_parameters=False,
-    # Added this to avoid the warning you saw earlier
-    remove_unused_columns=False 
+    # FIX: max_seq_length is now passed here in SFTConfig
+    max_seq_length=Config.max_length,
+    # Packing also goes here now
+    packing=False,
+    dataset_text_field="text", # If using formatting_func, this is often ignored but good to have
 )
 
-# Robust formatting function for SFTTrainer
 def formatting_prompts_func(example):
-    output_texts = []
-    for i in range(len(example['text'])):
-        output_texts.append(example['text'][i])
-    return output_texts
-
-# Ensure padding side is correct for training
-tokenizer.padding_side = "right"
+    return example["text"]
 
 trainer = SFTTrainer(
     model=model,
-    processing_class=tokenizer, 
-    train_dataset=combined,
-    formatting_func=formatting_prompts_func,
-    max_seq_length=Config.max_length,
     args=training_args,
-    packing=False,
+    train_dataset=combined,
+    processing_class=tokenizer,
+    formatting_func=formatting_prompts_func,
+    # Removed max_seq_length and packing from here
     dataset_kwargs={
-        "add_special_tokens": False,  
-        "append_concat_token": False,
+        "add_special_tokens": False,
     },
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
 )
 
 print("Starting training...")
-trainer.train() 
+trainer.train()
 
 # =========================
 # 7. SAVE
