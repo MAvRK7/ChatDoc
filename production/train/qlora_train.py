@@ -1,10 +1,8 @@
 # production/train/qlora_train.py
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-import math
 import torch
 from transformers import (
-    AutoModelForCausalLM,
     AutoProcessor,
     TrainingArguments,
     BitsAndBytesConfig,
@@ -62,13 +60,18 @@ bnb_config = BitsAndBytesConfig(
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto",
+    device_map="balanced",
     torch_dtype=torch.bfloat16,
     attn_implementation="sdpa",
     trust_remote_code=True
 )
 model.gradient_checkpointing_enable()
 model.config.use_cache = False
+
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+tokenizer = processor.tokenizer
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 tokenizer = processor.tokenizer
@@ -92,10 +95,11 @@ lora_config = LoraConfig(
 )
 
 print("Preparing model for QLoRA...")
-model = prepare_model_for_kbit_training(model)
+# model = prepare_model_for_kbit_training(model)
 model = get_peft_model(model, lora_config)
-for param in model.parameters():
-    if param.requires_grad:
+for name, param in model.named_parameters():
+    if "lora_" in name:
+        param.requires_grad = True
         param.data = param.data.to(torch.bfloat16)
 model.print_trainable_parameters()
 
