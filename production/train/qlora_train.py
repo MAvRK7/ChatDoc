@@ -11,7 +11,6 @@ from transformers import (
     Gemma4ForCausalLM
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer
 from datasets import load_dataset, concatenate_datasets
 
 MODEL_ID = "google/gemma-4-E2B-it"
@@ -74,6 +73,7 @@ model.config.vision_config = None
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 tokenizer = processor.tokenizer
 tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
 
 # =========================
 # 3. LoRA SETUP
@@ -186,15 +186,7 @@ class GenerateTextCallback(TrainerCallback):
                 text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
                 print(f"\n=== Sample generation at step {state.global_step:,} ===\n{text}\n")
 
-# =========================
-# 6. TRAINING
-# =========================
-
-# 1. Set the length limit directly on the tokenizer to avoid the SFTTrainer argument
-tokenizer.model_max_length = Config.max_length
-tokenizer.padding_side = "right"
-
-training_args = TrainingArguments(
+sft_config = SFTConfig(
     output_dir=Config.output_dir,
     max_steps=Config.max_steps,
     per_device_train_batch_size=Config.batch_size,
@@ -211,29 +203,23 @@ training_args = TrainingArguments(
     optim="paged_adamw_8bit",
     report_to="tensorboard",
     logging_dir=Config.log_dir,
-    ddp_find_unused_parameters=False,
-    remove_unused_columns=False,
+    # These were causing the TypeErrors when passed to SFTTrainer
+    max_seq_length=Config.max_length,
+    packing=False,
+    dataset_text_field="text", # Points to your mapped 'text' column
 )
 
-# SFTTrainer expects the formatting_func to return the text
-def formatting_prompts_func(example):
-    return example["text"]
-
-# We initialize without 'max_seq_length' to stop the TypeError.
-# The trainer will fall back to tokenizer.model_max_length (which we set above).
+# Initialize trainer with ONLY the absolute essentials
 trainer = SFTTrainer(
     model=model,
-    args=training_args,
+    args=sft_config,
     train_dataset=combined,
     processing_class=tokenizer,
-    formatting_func=formatting_prompts_func,
-    # REMOVED: max_seq_length
-    # REMOVED: packing
-    dataset_kwargs={
-        "add_special_tokens": False,
-    },
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
 )
+
+# Note: We removed 'formatting_func' because 'dataset_text_field' inside 
+# SFTConfig is the cleaner way to handle your format.
 
 print("Starting training...")
 trainer.train()
