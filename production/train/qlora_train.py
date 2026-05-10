@@ -48,8 +48,7 @@ class Config:
 # =========================
 # 2. LOAD MODEL (4-bit)
 # =========================
-
-print("Loading Gemma 4-E2B in 4-bit...")
+print("Loading Gemma 4-E2B...")
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
@@ -65,23 +64,19 @@ model = Gemma4ForCausalLM.from_pretrained(
     attn_implementation="sdpa",
     trust_remote_code=True
 )
-model.gradient_checkpointing_enable()
+
+# FIX: Modern checkpointing & text-only mode
+model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 model.config.use_cache = False
+model.config.vision_config = None 
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 tokenizer = processor.tokenizer
 tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right"
-
-processor = AutoProcessor.from_pretrained(MODEL_ID)
-tokenizer = processor.tokenizer
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right"
 
 # =========================
-# 3. LoRA SETUP (Fixed for Gemma 4)
+# 3. LoRA SETUP
 # =========================
-
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
@@ -91,29 +86,26 @@ lora_config = LoraConfig(
     task_type="CAUSAL_LM",
 )
 
-print("Applying deep patch for Gemma 4 native layers...")
-
-# This patch provides the metadata PEFT expects from BitsAndBytes
+# Deep patch for Gemma 4 native layers
 for name, module in model.named_modules():
     if any(target in name for target in lora_config.target_modules):
         if hasattr(module, "weight"):
-            # Deep patch to satisfy the PEFT dispatcher
             if not hasattr(module.weight, "compress_statistics"):
                 module.weight.compress_statistics = None
             if not hasattr(module.weight, "quant_type"):
-                module.weight.quant_type = "nf4" # Fake it so dispatcher continues
+                module.weight.quant_type = "nf4"
             if not hasattr(module.weight, "quant_state"):
                 module.weight.quant_state = None
 
-print("Initializing Peft Model...")
 model = get_peft_model(model, lora_config)
 
-# Manual preparation: convert LoRA weights to BF16
+# Manual preparation & weight tying
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
         param.data = param.data.to(torch.bfloat16)
 
+model.tie_weights() # FIX: Keeps GPUs in sync
 model.print_trainable_parameters()
 
 # =========================
@@ -212,7 +204,6 @@ training_args = TrainingArguments(
     save_total_limit=2,
     bf16=True,
     optim="paged_adamw_8bit",
-    group_by_length=True,
     report_to="tensorboard",
     logging_dir=Config.log_dir,
     ddp_find_unused_parameters=False,
@@ -226,6 +217,7 @@ trainer = SFTTrainer(
     max_seq_length=Config.max_length,
     args=training_args,
     packing=False,
+    dataset_kwargs={"group_by_length": True},
     callbacks=[GenerateTextCallback(tokenizer, prompt="Once upon a time,")]
 )
 
