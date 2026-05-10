@@ -100,36 +100,18 @@ lora_config = LoraConfig(
     task_type="CAUSAL_LM",
 )
 
-# AGGRESSIVE PATCH: Ensure ALL target modules have bnb attributes before PEFT wraps them
+# AGGRESSIVE PATCH: Monkey-patch bnb attributes directly onto Parameter objects
+# (PyTorch enforces Parameter type for .weight, so we can't replace it)
 for name, module in model.named_modules():
     if any(target in name for target in lora_config.target_modules):
-        # The weight might be directly on module, or on module.base_layer after some prep
         weight_obj = getattr(module, "weight", None)
         if weight_obj is None and hasattr(module, "base_layer"):
             weight_obj = getattr(module.base_layer, "weight", None)
         
-        if weight_obj is not None and not isinstance(weight_obj, type(None)):
-            if not hasattr(weight_obj, "compress_statistics"):
-                # If it's a plain Parameter, we need to wrap or patch it
-                if isinstance(weight_obj, torch.nn.Parameter):
-                    # Create a mock object with the required attributes
-                    class MockBnbParam:
-                        def __init__(self, param):
-                            self.param = param
-                            self.compress_statistics = None
-                            self.quant_type = "nf4"
-                            self.quant_state = None
-                            # Delegate all other attribute access to the real param
-                        def __getattr__(self, name):
-                            if name in ("compress_statistics", "quant_type", "quant_state", "param"):
-                                return object.__getattribute__(self, name)
-                            return getattr(self.param, name)
-                    
-                    # Replace the weight with our mock
-                    if hasattr(module, "weight"):
-                        module.weight = MockBnbParam(weight_obj)
-                    elif hasattr(module, "base_layer") and hasattr(module.base_layer, "weight"):
-                        module.base_layer.weight = MockBnbParam(weight_obj)
+        if weight_obj is not None:
+            object.__setattr__(weight_obj, "compress_statistics", None)
+            object.__setattr__(weight_obj, "quant_type", "nf4")
+            object.__setattr__(weight_obj, "quant_state", None)
 
 model = get_peft_model(model, lora_config)
 
