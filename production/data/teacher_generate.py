@@ -1,3 +1,4 @@
+# This script generates synthetic teacher response data using vLLM.
 import os
 import json
 import random
@@ -15,11 +16,13 @@ INPUT_FILE = "data/processed/train_formatted.jsonl"
 
 # Kaggle persistent output directory
 OUTPUT_DIR = "/kaggle/working/teacher_chunks"
-FINAL_OUTPUT = "/kaggle/working/teacher_responses_50k.jsonl"
+FINAL_OUTPUT = "/kaggle/working/teacher_responses.jsonl"
 
 TARGET_EXAMPLES = 50_000
-MAX_INPUT_TOKENS = 680   # Leave headroom for template + output
-MAX_OUTPUT_TOKENS = 64
+
+MAX_INPUT_TOKENS = 400    # Most user prompts are short
+MAX_OUTPUT_TOKENS = 512  # Allow complete responses
+max_model_len = 1024       # Gemma 2B can handle this
 
 CHUNK_SIZE = 700         # vLLM batch size
 CHUNKS_PER_FILE = 10     # Write to disk every 10 vLLM chunks (~7K items)
@@ -65,17 +68,12 @@ def build_prompts(tokenizer):
 
             # HARD TRUNCATE: slice tokens, decode, rebuild
             if len(tokens) > MAX_INPUT_TOKENS:
-                # Leave room for template overhead
                 safe_limit = MAX_INPUT_TOKENS - 10
                 tokens = tokens[:safe_limit]
 
-                # Decode back to raw text
                 decoded = tokenizer.decode(tokens, skip_special_tokens=True)
 
-                # Extract user content from Gemma template debris
-                # Template wraps as: <start_of_turn>user\n{content}<end_of_turn>
                 if "user" in decoded:
-                    # Strip template markers
                     cleaned = decoded.replace("<start_of_turn>", "").replace("<end_of_turn>", "")
                     if "user\n" in cleaned:
                         user_text = cleaned.split("user\n", 1)[1].strip()
@@ -93,7 +91,7 @@ def build_prompts(tokenizer):
                 add_generation_prompt=True
             )
 
-            # SAFETY CHECK: skip if still too long (shouldn't happen)
+            # SAFETY CHECK: skip if still too long
             final_tokens = tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
@@ -107,6 +105,20 @@ def build_prompts(tokenizer):
     print(f"\nTotal unique prompts available: {len(prompts):,}")
     return prompts
 
+def is_complete_response(text):
+    """Check if response looks complete (ends with period, question mark, or proper ending)."""
+    if not text:
+        return False
+    # Ends with sentence terminator or known closing
+    if text[-1] in '.?!)]}>':
+        return True
+    # Ends with list item or section header — probably truncated
+    if text[-1] in '-:':
+        return False
+    # Very short — likely truncated
+    if len(text.split()) < 20:
+        return False
+    return True
 
 # =========================
 # MAIN
@@ -120,7 +132,6 @@ def main():
 
     prompts = build_prompts(tokenizer)
 
-    # Deterministic shuffle for diversity
     random.seed(42)
     random.shuffle(prompts)
     prompts = prompts[:TARGET_EXAMPLES]
@@ -138,10 +149,11 @@ def main():
     )
 
     sampling_params = SamplingParams(
-        temperature=0.8,
-        top_p=0.95,
-        top_k=50,
-        max_tokens=MAX_OUTPUT_TOKENS,
+        temperature=0.3,        # Low = more focused, factual
+        top_p=0.9,              # Slightly restrictive
+        top_k=20,               # Limit wild tokens
+        max_tokens=512,
+        stop_sequences=["<end_of_turn>", "\n\n\n"],  # Also stop on triple newline (section end)
     )
 
     total_chunks = (len(prompts) + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -157,8 +169,11 @@ def main():
 
         outputs = llm.generate(chunk, sampling_params)
 
+
         for prompt, output in zip(chunk, outputs):
             response = output.outputs[0].text.strip()
+            if not is_complete_response(response):
+                continue  # Skip bad samples
             items_buffer.append({
                 "prompt": prompt,
                 "response": response
@@ -173,9 +188,8 @@ def main():
                 for item in items_buffer:
                     f.write(json.dumps(item, ensure_ascii=False) + "\n")
                 f.flush()
-                os.fsync(f.fileno())  # Force physical write to disk
+                os.fsync(f.fileno())
 
-            # VERIFY
             file_size = os.path.getsize(filepath)
             if file_size < 100:
                 raise RuntimeError(f"File write failed: {filepath} ({file_size} bytes)")

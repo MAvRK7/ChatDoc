@@ -11,8 +11,8 @@ import sentencepiece as spm
 
 from torch.utils.tensorboard import SummaryWriter
 
-from src.dataset.dataset import ConversationDataset, collate_batch
-from src.model.transformer import MoETransformer
+from research.dataset.dataset import ConversationDataset, collate_batch
+from research.model.transformer import MoETransformer
 
 
 class TrainConfig:

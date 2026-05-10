@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.model.moe import MoELayer
+from research.model.moe import MoELayer
 
 
 # ----------------------------

@@ -16,8 +16,8 @@ import torch.multiprocessing as mp
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dataset.distill_dataset import DistillDataset, collate_batch
-from model.transformer import MoETransformer
+from research.dataset.distill_dataset import DistillDataset, collate_batch
+from research.model.transformer import MoETransformer
 
 class Config:
     data_path = "data/distill_train.jsonl"

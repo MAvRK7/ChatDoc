@@ -3,7 +3,7 @@ import json
 import torch
 import torch.nn.functional as F
 from tokenizers import Tokenizer
-from src.model.transformer import MoETransformer
+from research.model.transformer import MoETransformer
 from tqdm import tqdm
 
 

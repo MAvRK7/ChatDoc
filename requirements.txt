@@ -6,3 +6,6 @@ tokenizers
 sentencepiece
 tensorboard
 transformers
+peft
+trl
+datasets

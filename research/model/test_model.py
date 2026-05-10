@@ -1,6 +1,6 @@
 import torch
 from tokenizers import Tokenizer
-from src.model.transformer import MoETransformer
+from research.model.transformer import MoETransformer
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"

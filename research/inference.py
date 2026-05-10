@@ -1,8 +1,8 @@
 import torch
 import re
 import sentencepiece as spm
-from src.model.transformer import MoETransformer
-from src.sampling import sample
+from research.model.transformer import MoETransformer
+from research.sampling import sample
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
