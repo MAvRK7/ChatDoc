@@ -10,7 +10,7 @@ from transformers import (
     TrainerCallback,
     Gemma4ForCausalLM
 )
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset, concatenate_datasets, Dataset
 
 MODEL_ID = "google/gemma-4-E2B-it"
@@ -90,6 +90,14 @@ tokenizer.model_max_length = Config.max_length
 # =========================
 # 3. LoRA SETUP
 # =========================
+# First, prepare the model for k-bit training (handles gradient checkpointing hooks properly)
+# Use a minimal version to avoid OOM
+model = prepare_model_for_kbit_training(
+    model,
+    use_gradient_checkpointing=True,
+    gradient_checkpointing_kwargs={"use_reentrant": False}
+)
+
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
@@ -99,7 +107,23 @@ lora_config = LoraConfig(
     task_type="CAUSAL_LM",
 )
 
-# Important: We apply LoRA BEFORE any manual casting to keep bnb attributes intact
+# Deep patch for Gemma 4 native layers - CRITICAL FIX
+for name, module in model.named_modules():
+    if any(target in name for target in lora_config.target_modules):
+        # Navigate to the actual base layer that has the weight
+        base_layer = module
+        if hasattr(module, "base_layer"):
+            base_layer = module.base_layer
+        
+        if hasattr(base_layer, "weight"):
+            weight = base_layer.weight
+            if not hasattr(weight, "compress_statistics"):
+                weight.compress_statistics = None
+            if not hasattr(weight, "quant_type"):
+                weight.quant_type = "nf4"
+            if not hasattr(weight, "quant_state"):
+                weight.quant_state = None
+
 model = get_peft_model(model, lora_config)
 
 # Ensure the LoRA weights themselves are in bf16
