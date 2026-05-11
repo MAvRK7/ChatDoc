@@ -19,19 +19,17 @@ from datasets import load_dataset, concatenate_datasets, Dataset
 # CONFIG
 # =========================
 
-MODEL_ID = "google/gemma-4-2b-it"   # ← text-only Gemma 4 2B instruct
-                                     #   NOT the multimodal E2B variant
+MODEL_ID = "google/gemma-4-E2B-it"   # correct casing, confirmed on HF
 
 class Config:
     ultrachat_path   = "data/processed/train.jsonl"
     medical_path     = "data/finetune/train_deduped.jsonl"
     output_dir       = "checkpoints/gemma-lora"
     final_dir        = "checkpoints/gemma-lora-final"
-    log_dir          = "outputs/runs"
 
     batch_size        = 1
     grad_accum_steps  = 16
-    max_length        = 512   # 128 is very short; bumped to 512
+    max_length        = 512
 
     lr            = 2e-4
     weight_decay  = 0.01
@@ -41,18 +39,18 @@ class Config:
     eval_every    = 500
     log_every     = 25
 
-    lora_r        = 8        # 4 is very small; 8 is safer
+    lora_r        = 8
     lora_alpha    = 16
     lora_dropout  = 0.05
 
 # =========================
-# MODEL (4-bit QLoRA)
+# MODEL
 # =========================
 
-print("Loading Gemma 4 text model...")
+print("Loading Gemma 4 E2B...")
 
 bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,                      # 4-bit is more stable on T4 than 8-bit
+    load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.bfloat16,
     bnb_4bit_use_double_quant=True,
@@ -61,16 +59,12 @@ bnb_config = BitsAndBytesConfig(
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto",                      # single T4 — auto is fine
+    device_map="auto",
     torch_dtype=torch.bfloat16,
     attn_implementation="eager",
     trust_remote_code=True,
 )
 
-# prepare_model_for_kbit_training handles:
-#   - freezing base weights
-#   - enabling gradient checkpointing correctly
-#   - casting layernorms to fp32
 model = prepare_model_for_kbit_training(
     model,
     use_gradient_checkpointing=True,
@@ -82,21 +76,21 @@ model = prepare_model_for_kbit_training(
 # =========================
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-tokenizer.pad_token       = tokenizer.eos_token
-tokenizer.padding_side    = "right"
+tokenizer.pad_token        = tokenizer.eos_token
+tokenizer.padding_side     = "right"
 tokenizer.model_max_length = Config.max_length
 
 # =========================
 # LORA
+# Key fix: instead of naming target_modules explicitly (which hits
+# Gemma4ClippableLinear wrappers), we pass "all-linear" so PEFT
+# walks the module tree itself and only wraps actual nn.Linear leaves.
 # =========================
 
 lora_config = LoraConfig(
     r              = Config.lora_r,
     lora_alpha     = Config.lora_alpha,
-    target_modules = [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-    ],
+    target_modules = "all-linear",   # ← avoids the ClippableLinear error
     lora_dropout   = Config.lora_dropout,
     bias           = "none",
     task_type      = "CAUSAL_LM",
@@ -158,7 +152,6 @@ medical = medical.map(format_medical, remove_columns=medical.column_names)
 
 medical_repeated = concatenate_datasets([medical] * 5)
 combined = concatenate_datasets([ultrachat, medical_repeated]).shuffle(seed=42)
-
 print(f"Total training samples: {len(combined):,}")
 
 # =========================
@@ -167,8 +160,8 @@ print(f"Total training samples: {len(combined):,}")
 
 class GenerateTextCallback(TrainerCallback):
     def __init__(self, tokenizer, prompt="Once upon a time,", max_new_tokens=50):
-        self.tokenizer     = tokenizer
-        self.prompt        = prompt
+        self.tokenizer      = tokenizer
+        self.prompt         = prompt
         self.max_new_tokens = max_new_tokens
 
     def on_step_end(self, args, state, control, **kwargs):
@@ -206,7 +199,7 @@ sft_config = SFTConfig(
     save_strategy               = "steps",
     save_steps                  = Config.eval_every,
     save_total_limit            = 2,
-    bf16                        = True,    # T4 supports bf16 via emulation; if errors swap to fp16=True
+    fp16                        = True,   # T4 doesn't natively support bf16, use fp16
     optim                       = "paged_adamw_8bit",
     report_to                   = "tensorboard",
     dataset_text_field          = "text",
