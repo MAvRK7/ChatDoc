@@ -33,7 +33,7 @@ class Config:
     # Training
     batch_size = 1
     grad_accum_steps = 16 #8
-    max_length = 256 # 1024
+    max_length = 128 # 1024
     lr = 2e-4
     weight_decay = 0.01
     warmup_steps = 100
@@ -42,7 +42,7 @@ class Config:
     log_every = 25
 
     # LoRA
-    lora_r = 8 # 32
+    lora_r = 4 # 32
     lora_alpha = 4 # 16
     lora_dropout = 0.05
 
@@ -60,9 +60,10 @@ bnb_config = BitsAndBytesConfig(
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="cuda:0",
-    torch_dtype=torch.bfloat16,
-    attn_implementation="sdpa",
+    device_map="balanced_low_0",
+    torch_dtype=torch.float16,#torch_dtype=torch.bfloat16,
+    # attn_implementation="sdpa",
+    attn_implementation="eager",
     trust_remote_code=True
 )
 
@@ -221,7 +222,9 @@ sft_config = SFTConfig(
     save_strategy="steps",
     save_steps=Config.eval_every,
     save_total_limit=2,
-    bf16=True,
+    # bf16=True,
+    fp16=True,
+    bf16=False,
     optim="paged_adamw_8bit",
     report_to="tensorboard",
     dataset_text_field="text",
