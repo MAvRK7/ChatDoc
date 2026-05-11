@@ -48,7 +48,7 @@ class Config:
     lora_dropout = 0.05
 
 # =========================
-# 2. LOAD MODEL (8-bit, safe for 2×T4)
+# 2. LOAD MODEL (8-bit)
 # =========================
 print("Loading Gemma 4-E2B...")
 
@@ -61,22 +61,25 @@ bnb_config = BitsAndBytesConfig(
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="balanced_low_0",  # splits across both GPUs efficiently
+    device_map="balanced_low_0",
     torch_dtype=torch.float16,
     attn_implementation="eager",
     trust_remote_code=True
 )
 
-# MANUAL PREP: No PEFT patch needed
-model.gradient_checkpointing_enable(
+# DROP VISION TOWER: Not needed for text-only training, avoids BnB/PEFT bug
+print("Removing vision tower for text-only training...")
+model.vision_tower = None
+model.config.vision_config = None
+gc.collect()
+torch.cuda.empty_cache()
+
+# Now safe to use prepare_model_for_kbit_training
+model = prepare_model_for_kbit_training(
+    model,
+    use_gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False}
 )
-
-# Enable gradients on input embeddings for LoRA
-def make_inputs_require_grad(module, input, output):
-    output.requires_grad_(True)
-
-model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
 model.config.use_cache = False
 
@@ -87,41 +90,6 @@ tokenizer = processor.tokenizer
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
 tokenizer.model_max_length = Config.max_length
-
-# =========================
-# 3. LoRA SETUP
-# =========================
-
-lora_config = LoraConfig(
-    r=Config.lora_r,
-    lora_alpha=Config.lora_alpha,
-    target_modules=["q_proj", "v_proj"],
-    lora_dropout=Config.lora_dropout,
-    bias="none",
-    task_type="CAUSAL_LM",
-)
-
-# PATCH for 8-bit: Ensure quant_state exists on all target weights
-for name, module in model.named_modules():
-    if any(target in name for target in lora_config.target_modules):
-        weight_obj = getattr(module, "weight", None)
-        if weight_obj is None and hasattr(module, "base_layer"):
-            weight_obj = getattr(module.base_layer, "weight", None)
-        if weight_obj is not None and not hasattr(weight_obj, "quant_state"):
-            object.__setattr__(weight_obj, "quant_state", None)
-
-model = get_peft_model(model, lora_config)
-
-# Ensure LoRA weights are bf16 + trainable
-for name, param in model.named_parameters():
-    if "lora_" in name:
-        param.requires_grad = True
-        param.data = param.data.to(torch.bfloat16)
-
-model.print_trainable_parameters()
-
-gc.collect()
-torch.cuda.empty_cache()
 
 # =========================
 # 4. LOAD & FORMAT DATA
