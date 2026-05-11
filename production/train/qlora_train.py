@@ -9,9 +9,8 @@ from transformers import (
     AutoProcessor,
     BitsAndBytesConfig,
     TrainerCallback,
-    Gemma4ForCausalLM
 )
-from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
+from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear, Gemma4ForCausalLM
 from peft import LoraConfig, get_peft_model
 from datasets import load_dataset, concatenate_datasets, Dataset
 import bitsandbytes as bnb
