@@ -2,8 +2,17 @@ import os
 import json
 import gc
 import torch
+from dataclasses import dataclass
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+# ============================================================
+# MUST come before any transformers import
+# ============================================================
+# Fix: SFTConfig in newer TRL dropped max_seq_length as a
+# constructor arg — it moved to SFTTrainer. We handle this
+# by not passing it at all and relying on tokenizer.model_max_length.
+# ============================================================
 
 from trl import SFTTrainer, SFTConfig
 from transformers import (
@@ -29,7 +38,7 @@ class Config:
 
     batch_size        = 1
     grad_accum_steps  = 16
-    max_length        = 128      # keep short for T4 VRAM
+    max_length        = 128      # hard limit for T4 VRAM
 
     lr            = 2e-4
     weight_decay  = 0.01
@@ -39,9 +48,19 @@ class Config:
     eval_every    = 500
     log_every     = 25
 
-    lora_r        = 4            # keep small for T4
+    lora_r        = 4
     lora_alpha    = 8
     lora_dropout  = 0.05
+
+# =========================
+# TOKENIZER (load first — needed for data formatting)
+# =========================
+
+print("Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+tokenizer.pad_token        = tokenizer.eos_token
+tokenizer.padding_side     = "right"
+tokenizer.model_max_length = Config.max_length
 
 # =========================
 # MODEL
@@ -52,7 +71,7 @@ print("Loading Gemma 4 E2B...")
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,  # float16 not bfloat16 — T4 has no native bf16
+    bnb_4bit_compute_dtype=torch.float16,   # float16, not bfloat16 — T4 has no native bf16
     bnb_4bit_use_double_quant=True,
 )
 
@@ -65,27 +84,57 @@ model = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True,
 )
 
-# -------------------------------------------------------
-# Manual kbit prep — avoids the OOM from prepare_model_for_kbit_training
-# which casts ALL non-quantized params to float32 in one shot.
-# We instead:
-#   1. freeze everything
-#   2. leave layernorms in float16 (sufficient for stability, saves VRAM)
-#   3. enable gradient checkpointing ourselves
-# -------------------------------------------------------
+# ============================================================
+# FIX 1: Post-load unwrap of Gemma4ClippableLinear
+#
+# Gemma 4 wraps vision/audio attention layers in ClippableLinear
+# (inherits nn.Module, not nn.Linear) so PEFT rejects them.
+# Replacing each with its inner .linear after load preserves
+# the correct checkpoint weights while giving PEFT plain nn.Linear.
+#
+# Note: if your PEFT is >= 0.19.0, omitting target_modules also
+# works (it uses a regex scoped to LM layers), but the unwrap is
+# safer across versions and costs nothing.
+# ============================================================
 
+def unwrap_clippable_linears(model):
+    from transformers.models.gemma4 import modeling_gemma4
+    ClippableLinear = getattr(modeling_gemma4, "Gemma4ClippableLinear", None)
+    if ClippableLinear is None:
+        print("Gemma4ClippableLinear not found — skipping unwrap (may not be needed).")
+        return model
+
+    replaced = 0
+    for parent_name, parent_module in list(model.named_modules()):
+        for child_name, child_module in list(parent_module.named_children()):
+            if isinstance(child_module, ClippableLinear):
+                # .linear is the inner nn.Linear (or Linear4bit) with correct weights
+                setattr(parent_module, child_name, child_module.linear)
+                replaced += 1
+
+    print(f"Unwrapped {replaced} Gemma4ClippableLinear modules.")
+    return model
+
+model = unwrap_clippable_linears(model)
+
+# ============================================================
+# FIX 2: Manual kbit prep — avoids prepare_model_for_kbit_training
+# which OOMs on T4 by casting ALL non-quantized params to fp32
+# at once (including the ~400M embedding table).
+# ============================================================
+
+# Freeze all base weights
 for param in model.parameters():
     param.requires_grad = False
 
-# Only unfreeze & upcast the layernorms — these are tiny, safe to cast
+# Upcast ONLY layernorms to fp32 — these are tiny (KB not GB)
+# and fp32 is required for numerical stability during training
 for name, param in model.named_parameters():
     if "norm" in name:
         param.data = param.data.to(torch.float32)
 
 model.config.use_cache = False
-
-# Gradient checkpointing without prepare_model_for_kbit_training
-model.enable_input_require_grads()   # needed for LoRA grads to flow
+model.enable_input_require_grads()   # required for LoRA grads to flow through frozen base
 model.gradient_checkpointing_enable(
     gradient_checkpointing_kwargs={"use_reentrant": False}
 )
@@ -94,32 +143,26 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # =========================
-# TOKENIZER
-# =========================
-
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-tokenizer.pad_token        = tokenizer.eos_token
-tokenizer.padding_side     = "right"
-tokenizer.model_max_length = Config.max_length
-
-# =========================
 # LORA
-# "all-linear" walks the module tree and wraps nn.Linear leaves only,
-# skipping Gemma4ClippableLinear wrappers that would cause the PEFT error
+# Omit target_modules entirely — PEFT >= 0.19.0 uses Gemma 4
+# default targets scoped to LM layers via regex, safely skipping
+# any remaining ClippableLinear modules.
+# If you need to be explicit, use "all-linear" (NOT a named list)
+# which also skips wrappers by walking to nn.Linear leaves.
 # =========================
 
 lora_config = LoraConfig(
-    r              = Config.lora_r,
-    lora_alpha     = Config.lora_alpha,
-    target_modules = "all-linear",
-    lora_dropout   = Config.lora_dropout,
-    bias           = "none",
-    task_type      = "CAUSAL_LM",
+    r            = Config.lora_r,
+    lora_alpha   = Config.lora_alpha,
+    # No target_modules — let PEFT use Gemma 4 defaults (LM layers only)
+    lora_dropout = Config.lora_dropout,
+    bias         = "none",
+    task_type    = "CAUSAL_LM",
 )
 
 model = get_peft_model(model, lora_config)
 
-# LoRA weights must be float16 to match compute dtype
+# Cast LoRA weights to float16 to match compute dtype
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
@@ -182,6 +225,67 @@ medical_repeated = concatenate_datasets([medical] * 5)
 combined = concatenate_datasets([ultrachat, medical_repeated]).shuffle(seed=42)
 print(f"Total training samples: {len(combined):,}")
 
+# ============================================================
+# FIX 3: Custom data collator supplying mm_token_type_ids
+#
+# Gemma 4 validates mm_token_type_ids in its forward pass even
+# for text-only inputs. Standard collators don't produce it.
+# We pad everything manually and supply zeros for both
+# token_type_ids and mm_token_type_ids.
+# ============================================================
+
+def tokenize_dataset(example):
+    encoded = tokenizer(
+        example["text"],
+        truncation=True,
+        max_length=Config.max_length,
+        padding=False,
+    )
+    seq_len = len(encoded["input_ids"])
+    encoded["token_type_ids"]    = [0] * seq_len
+    encoded["mm_token_type_ids"] = [0] * seq_len
+    encoded["labels"]            = encoded["input_ids"].copy()
+    return encoded
+
+combined = combined.map(
+    tokenize_dataset,
+    remove_columns=["text"],
+    desc="Tokenizing",
+)
+
+@dataclass
+class Gemma4Collator:
+    """
+    Pads all fields including mm_token_type_ids which Gemma 4
+    requires even for text-only batches.
+    """
+    pad_token_id: int
+
+    def __call__(self, features):
+        max_len = max(len(f["input_ids"]) for f in features)
+        pad_id  = self.pad_token_id
+
+        batch = {k: [] for k in
+                 ["input_ids", "attention_mask",
+                  "token_type_ids", "mm_token_type_ids", "labels"]}
+
+        for f in features:
+            seq_len = len(f["input_ids"])
+            pad_len = max_len - seq_len
+
+            batch["input_ids"].append(
+                f["input_ids"] + [pad_id] * pad_len)
+            batch["attention_mask"].append(
+                [1] * seq_len + [0] * pad_len)
+            batch["token_type_ids"].append([0] * max_len)
+            batch["mm_token_type_ids"].append([0] * max_len)
+            batch["labels"].append(
+                f.get("labels", f["input_ids"]) + [-100] * pad_len)
+
+        return {k: torch.tensor(v) for k, v in batch.items()}
+
+collator = Gemma4Collator(pad_token_id=tokenizer.pad_token_id)
+
 # =========================
 # CALLBACK
 # =========================
@@ -211,6 +315,10 @@ class GenerateTextCallback(TrainerCallback):
 
 # =========================
 # TRAINING
+# Fix: max_seq_length is NOT a valid SFTConfig kwarg in newer TRL.
+# dataset_text_field must be None when using a pre-tokenized dataset
+# with a custom collator. remove_unused_columns=False is required
+# so mm_token_type_ids isn't stripped before reaching the model.
 # =========================
 
 sft_config = SFTConfig(
@@ -227,17 +335,18 @@ sft_config = SFTConfig(
     save_strategy               = "steps",
     save_steps                  = Config.eval_every,
     save_total_limit            = 2,
-    fp16                        = True,   # T4: use fp16, not bf16
+    fp16                        = True,
     optim                       = "paged_adamw_8bit",
     report_to                   = "tensorboard",
-    dataset_text_field          = "text",
-    max_seq_length              = Config.max_length,
+    dataset_text_field          = None,        # we pre-tokenized; no on-the-fly text field
+    remove_unused_columns       = False,       # keep mm_token_type_ids alive
 )
 
 trainer = SFTTrainer(
     model            = model,
     args             = sft_config,
     train_dataset    = combined,
+    data_collator    = collator,
     processing_class = tokenizer,
     callbacks        = [GenerateTextCallback(tokenizer)],
 )
