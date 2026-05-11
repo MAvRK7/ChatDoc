@@ -12,14 +12,14 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from datasets import load_dataset, concatenate_datasets, Dataset
 
 # =========================
 # CONFIG
 # =========================
 
-MODEL_ID = "google/gemma-4-E2B-it"   # correct casing, confirmed on HF
+MODEL_ID = "google/gemma-4-E2B-it"
 
 class Config:
     ultrachat_path   = "data/processed/train.jsonl"
@@ -29,7 +29,7 @@ class Config:
 
     batch_size        = 1
     grad_accum_steps  = 16
-    max_length        = 512
+    max_length        = 128      # keep short for T4 VRAM
 
     lr            = 2e-4
     weight_decay  = 0.01
@@ -39,8 +39,8 @@ class Config:
     eval_every    = 500
     log_every     = 25
 
-    lora_r        = 8
-    lora_alpha    = 16
+    lora_r        = 4            # keep small for T4
+    lora_alpha    = 8
     lora_dropout  = 0.05
 
 # =========================
@@ -52,7 +52,7 @@ print("Loading Gemma 4 E2B...")
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_compute_dtype=torch.float16,  # float16 not bfloat16 — T4 has no native bf16
     bnb_4bit_use_double_quant=True,
 )
 
@@ -60,16 +60,38 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
     device_map="auto",
-    torch_dtype=torch.bfloat16,
+    torch_dtype=torch.float16,
     attn_implementation="eager",
     trust_remote_code=True,
 )
 
-model = prepare_model_for_kbit_training(
-    model,
-    use_gradient_checkpointing=True,
-    gradient_checkpointing_kwargs={"use_reentrant": False},
+# -------------------------------------------------------
+# Manual kbit prep — avoids the OOM from prepare_model_for_kbit_training
+# which casts ALL non-quantized params to float32 in one shot.
+# We instead:
+#   1. freeze everything
+#   2. leave layernorms in float16 (sufficient for stability, saves VRAM)
+#   3. enable gradient checkpointing ourselves
+# -------------------------------------------------------
+
+for param in model.parameters():
+    param.requires_grad = False
+
+# Only unfreeze & upcast the layernorms — these are tiny, safe to cast
+for name, param in model.named_parameters():
+    if "norm" in name:
+        param.data = param.data.to(torch.float32)
+
+model.config.use_cache = False
+
+# Gradient checkpointing without prepare_model_for_kbit_training
+model.enable_input_require_grads()   # needed for LoRA grads to flow
+model.gradient_checkpointing_enable(
+    gradient_checkpointing_kwargs={"use_reentrant": False}
 )
+
+gc.collect()
+torch.cuda.empty_cache()
 
 # =========================
 # TOKENIZER
@@ -82,21 +104,27 @@ tokenizer.model_max_length = Config.max_length
 
 # =========================
 # LORA
-# Key fix: instead of naming target_modules explicitly (which hits
-# Gemma4ClippableLinear wrappers), we pass "all-linear" so PEFT
-# walks the module tree itself and only wraps actual nn.Linear leaves.
+# "all-linear" walks the module tree and wraps nn.Linear leaves only,
+# skipping Gemma4ClippableLinear wrappers that would cause the PEFT error
 # =========================
 
 lora_config = LoraConfig(
     r              = Config.lora_r,
     lora_alpha     = Config.lora_alpha,
-    target_modules = "all-linear",   # ← avoids the ClippableLinear error
+    target_modules = "all-linear",
     lora_dropout   = Config.lora_dropout,
     bias           = "none",
     task_type      = "CAUSAL_LM",
 )
 
 model = get_peft_model(model, lora_config)
+
+# LoRA weights must be float16 to match compute dtype
+for name, param in model.named_parameters():
+    if "lora_" in name:
+        param.requires_grad = True
+        param.data = param.data.to(torch.float16)
+
 model.print_trainable_parameters()
 
 gc.collect()
@@ -199,7 +227,7 @@ sft_config = SFTConfig(
     save_strategy               = "steps",
     save_steps                  = Config.eval_every,
     save_total_limit            = 2,
-    fp16                        = True,   # T4 doesn't natively support bf16, use fp16
+    fp16                        = True,   # T4: use fp16, not bf16
     optim                       = "paged_adamw_8bit",
     report_to                   = "tensorboard",
     dataset_text_field          = "text",
