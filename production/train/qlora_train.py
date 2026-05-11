@@ -4,7 +4,6 @@ import json
 import gc
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-import peft.utils.other
 from trl import SFTTrainer, SFTConfig
 import torch
 from transformers import (
@@ -19,6 +18,25 @@ from peft import (
     prepare_model_for_kbit_training
 )
 from datasets import load_dataset, concatenate_datasets, Dataset
+
+# === MONKEY-PATCH PEFT BEFORE ANY OTHER IMPORTS ===
+import peft.utils.other
+
+_original_prepare = peft.utils.other.prepare_model_for_kbit_training
+
+def patched_prepare(model, use_gradient_checkpointing=True, gradient_checkpointing_kwargs=None):
+    if use_gradient_checkpointing:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs or {})
+    # Enable input gradients without fp32 cast
+    if hasattr(model, "get_input_embeddings"):
+        def make_inputs_require_grad(module, input, output):
+            output.requires_grad_(True)
+        model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    model.config.use_cache = False
+    return model
+
+peft.utils.other.prepare_model_for_kbit_training = patched_prepare
+# === END PATCH ===
 
 MODEL_ID = "google/gemma-4-E2B-it"
 
@@ -82,14 +100,8 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # =========================
-# 3. FREEZE + PREPARE FOR QLORA
+# 3. PREPARE FOR QLORA
 # =========================
-
-print("Freezing base model weights...")
-for name, param in model.named_parameters():
-    param.requires_grad = False
-
-torch.cuda.empty_cache()
 
 # Now prepare_model_for_kbit_training won't find anything to cast to fp32
 model = prepare_model_for_kbit_training(
