@@ -3,6 +3,7 @@ import os
 import json
 import gc
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+import peft.utils.other
 from trl import SFTTrainer, SFTConfig
 import torch
 from transformers import (
@@ -61,21 +62,33 @@ model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
     device_map="balanced_low_0",
-    torch_dtype=torch.float16,#torch_dtype=torch.bfloat16,
-    # attn_implementation="sdpa",
+    torch_dtype=torch.float16,
     attn_implementation="eager",
     trust_remote_code=True
 )
 
-# Proper PEFT preparation for k-bit training (handles gradient checkpointing)
+# PATCH: Skip PEFT's fp32 recasting that causes OOM
+_original_prepare = peft.utils.other.prepare_model_for_kbit_training
+
+def patched_prepare(model, use_gradient_checkpointing=True, gradient_checkpointing_kwargs=None):
+    if use_gradient_checkpointing:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs or {})
+    # Enable input gradients without casting to fp32
+    if hasattr(model, "get_input_embeddings"):
+        def make_inputs_require_grad(module, input, output):
+            output.requires_grad_(True)
+        model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    model.config.use_cache = False
+    return model
+
+peft.utils.other.prepare_model_for_kbit_training = patched_prepare
+
+# Now call it — won't OOM
 model = prepare_model_for_kbit_training(
     model,
     use_gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False}
 )
-
-model.config.use_cache = False
-#model.config.vision_config = None
 
 torch.cuda.empty_cache()
 
@@ -97,8 +110,6 @@ lora_config = LoraConfig(
     bias="none",
     task_type="CAUSAL_LM",
 )
-
-# NO PATCH NEEDED for 8-bit — prepare_model_for_kbit_training handles it
 
 model = get_peft_model(model, lora_config)
 
