@@ -48,7 +48,7 @@ class Config:
     lora_dropout = 0.05
 
 # =========================
-# 2. LOAD MODEL (8-bit)
+# 2. LOAD MODEL (8-bit, safe for 2×T4)
 # =========================
 print("Loading Gemma 4-E2B...")
 
@@ -61,34 +61,24 @@ bnb_config = BitsAndBytesConfig(
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="balanced_low_0",
+    device_map="balanced_low_0",  # splits across both GPUs efficiently
     torch_dtype=torch.float16,
     attn_implementation="eager",
     trust_remote_code=True
 )
 
-# PATCH: Skip PEFT's fp32 recasting that causes OOM
-_original_prepare = peft.utils.other.prepare_model_for_kbit_training
-
-def patched_prepare(model, use_gradient_checkpointing=True, gradient_checkpointing_kwargs=None):
-    if use_gradient_checkpointing:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs or {})
-    # Enable input gradients without casting to fp32
-    if hasattr(model, "get_input_embeddings"):
-        def make_inputs_require_grad(module, input, output):
-            output.requires_grad_(True)
-        model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
-    model.config.use_cache = False
-    return model
-
-peft.utils.other.prepare_model_for_kbit_training = patched_prepare
-
-# Now call it — won't OOM
-model = prepare_model_for_kbit_training(
-    model,
-    use_gradient_checkpointing=True,
+# MANUAL PREP: No PEFT patch needed
+model.gradient_checkpointing_enable(
     gradient_checkpointing_kwargs={"use_reentrant": False}
 )
+
+# Enable gradients on input embeddings for LoRA
+def make_inputs_require_grad(module, input, output):
+    output.requires_grad_(True)
+
+model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
+model.config.use_cache = False
 
 torch.cuda.empty_cache()
 
@@ -110,6 +100,15 @@ lora_config = LoraConfig(
     bias="none",
     task_type="CAUSAL_LM",
 )
+
+# PATCH for 8-bit: Ensure quant_state exists on all target weights
+for name, module in model.named_modules():
+    if any(target in name for target in lora_config.target_modules):
+        weight_obj = getattr(module, "weight", None)
+        if weight_obj is None and hasattr(module, "base_layer"):
+            weight_obj = getattr(module.base_layer, "weight", None)
+        if weight_obj is not None and not hasattr(weight_obj, "quant_state"):
+            object.__setattr__(weight_obj, "quant_state", None)
 
 model = get_peft_model(model, lora_config)
 
