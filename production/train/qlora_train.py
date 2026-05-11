@@ -1,23 +1,7 @@
-# production/train/qlora_train.py
 import os
 import json
 import gc
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-from trl import SFTTrainer, SFTConfig
-import torch
-from transformers import (
-    AutoProcessor,
-    BitsAndBytesConfig,
-    TrainerCallback,
-    Gemma4ForCausalLM
-)
-from peft import (
-    LoraConfig,
-    get_peft_model,
-    prepare_model_for_kbit_training
-)
-from datasets import load_dataset, concatenate_datasets, Dataset
 
 # === MONKEY-PATCH PEFT BEFORE ANY OTHER IMPORTS ===
 import peft.utils.other
@@ -37,6 +21,21 @@ def patched_prepare(model, use_gradient_checkpointing=True, gradient_checkpointi
 
 peft.utils.other.prepare_model_for_kbit_training = patched_prepare
 # === END PATCH ===
+
+from trl import SFTTrainer, SFTConfig
+import torch
+from transformers import (
+    AutoProcessor,
+    BitsAndBytesConfig,
+    TrainerCallback,
+    Gemma4ForCausalLM
+)
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    prepare_model_for_kbit_training
+)
+from datasets import load_dataset, concatenate_datasets, Dataset
 
 MODEL_ID = "google/gemma-4-E2B-it"
 
