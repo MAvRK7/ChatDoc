@@ -6,12 +6,52 @@ import torch.nn as nn
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+# =========================================================
+# CRITICAL FIX: Patch Gemma4ClippableLinear BEFORE any transformers import
+# This makes it inherit from nn.Linear so PEFT recognizes it
+# =========================================================
+
+# We need to patch the modeling module BEFORE transformers loads it
+import sys
+import importlib
+
+# Pre-create the module path so we can patch it
+sys.modules['transformers.models.gemma4'] = type(sys)('transformers.models.gemma4')
+sys.modules['transformers.models.gemma4.modeling_gemma4'] = type(sys)('transformers.models.gemma4.modeling_gemma4')
+
+# Now define the patched class in that module
+modeling_module = sys.modules['transformers.models.gemma4.modeling_gemma4']
+
+class PatchedGemma4ClippableLinear(nn.Linear):
+    def __init__(self, config, in_features, out_features, **kwargs):
+        nn.Linear.__init__(self, in_features, out_features, bias=False)
+        self.use_clipped_linears = getattr(config, "use_clipped_linears", False)
+        if self.use_clipped_linears:
+            self.register_buffer("input_min", torch.tensor(-float("inf")))
+            self.register_buffer("input_max", torch.tensor(float("inf")))
+            self.register_buffer("output_min", torch.tensor(-float("inf")))
+            self.register_buffer("output_max", torch.tensor(float("inf")))
+    
+    def forward(self, x):
+        if self.use_clipped_linears:
+            x = torch.clamp(x, self.input_min, self.input_max)
+        out = nn.Linear.forward(self, x)
+        if self.use_clipped_linears:
+            out = torch.clamp(out, self.output_min, self.output_max)
+        return out
+
+modeling_module.Gemma4ClippableLinear = PatchedGemma4ClippableLinear
+
+# =========================================================
+# END CRITICAL FIX
+# =========================================================
+
 from trl import SFTTrainer, SFTConfig
 from transformers import (
     AutoProcessor,
     BitsAndBytesConfig,
     TrainerCallback,
-    AutoModelForCausalLM
+    Gemma4ForCausalLM
 )
 from peft import LoraConfig, get_peft_model
 from datasets import load_dataset, concatenate_datasets, Dataset
@@ -62,7 +102,7 @@ bnb_config = BitsAndBytesConfig(
     llm_int8_skip_modules=["lm_head"]
 )
 
-model = AutoModelForCausalLM.from_pretrained(
+model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
     device_map="balanced_low_0",
@@ -105,7 +145,7 @@ tokenizer.model_max_length = Config.max_length
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    target_modules=["q_proj", "v_proj"],  # Text decoder only
+    target_modules=["q_proj", "v_proj"],
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
