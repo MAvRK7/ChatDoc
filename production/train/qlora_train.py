@@ -11,38 +11,8 @@ from transformers import (
     TrainerCallback,
     Gemma4ForCausalLM
 )
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset, concatenate_datasets, Dataset
-
-MODEL_ID = "google/gemma-4-E2B-it"
-
-import bitsandbytes as bnb
-from bitsandbytes.nn.modules import fix_4bit_weight_quant_state_from_module
-
-# =========================================================
-# PATCH FOR GEMMA4 + BNB 4BIT ASSERTION BUG
-# =========================================================
-
-_original_fix = fix_4bit_weight_quant_state_from_module
-
-def patched_fix_4bit_weight_quant_state_from_module(module):
-    try:
-        return _original_fix(module)
-
-    except AssertionError:
-        # Gemma4 projection layers sometimes violate
-        # internal BnB assumptions during quant state repair.
-        # Skip repair instead of crashing.
-
-        if hasattr(module, "weight"):
-            if not hasattr(module.weight, "quant_state"):
-                module.weight.quant_state = None
-
-        return
-
-bnb.nn.modules.fix_4bit_weight_quant_state_from_module = (
-    patched_fix_4bit_weight_quant_state_from_module
-)
 
 MODEL_ID = "google/gemma-4-E2B-it"
 
@@ -63,7 +33,7 @@ class Config:
     # Training
     batch_size = 1
     grad_accum_steps = 8
-    max_length = 1024
+    max_length = 512 # 1024
     lr = 2e-4
     weight_decay = 0.01
     warmup_steps = 100
@@ -72,21 +42,19 @@ class Config:
     log_every = 25
 
     # LoRA
-    lora_r = 32
-    lora_alpha = 16
+    lora_r = 16 # 32
+    lora_alpha = 8 # 16
     lora_dropout = 0.05
 
 # =========================
-# 2. LOAD MODEL (4-bit)
+# 2. LOAD MODEL (8-bit)
 # =========================
-
 print("Loading Gemma 4-E2B...")
 
 bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,
+    load_in_8bit=True,
+    llm_int8_threshold=6.0,
+    llm_int8_skip_modules=["lm_head"]
 )
 
 model = Gemma4ForCausalLM.from_pretrained(
@@ -98,30 +66,19 @@ model = Gemma4ForCausalLM.from_pretrained(
     trust_remote_code=True
 )
 
-torch.cuda.empty_cache()
-
-# =========================================================
-# MANUAL PREP (LOW VRAM SAFE)
-# =========================================================
-
-model.gradient_checkpointing_enable(
+# Proper PEFT preparation for k-bit training (handles gradient checkpointing)
+model = prepare_model_for_kbit_training(
+    model,
+    use_gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False}
 )
 
-# Enable gradients on input embeddings
-# WITHOUT casting whole model to fp32
-def make_inputs_require_grad(module, input, output):
-    output.requires_grad_(True)
-
-model.get_input_embeddings().register_forward_hook(
-    make_inputs_require_grad
-)
-
 model.config.use_cache = False
-model.config.vision_config = None
+#model.config.vision_config = None
+
+torch.cuda.empty_cache()
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
-
 tokenizer = processor.tokenizer
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"
@@ -140,18 +97,7 @@ lora_config = LoraConfig(
     task_type="CAUSAL_LM",
 )
 
-# PATCH: Add missing bnb attributes to all target module weights
-# BEFORE get_peft_model tries to read them
-for name, module in model.named_modules():
-    if any(target in name for target in lora_config.target_modules):
-        weight_obj = getattr(module, "weight", None)
-        if weight_obj is None and hasattr(module, "base_layer"):
-            weight_obj = getattr(module.base_layer, "weight", None)
-        
-        if weight_obj is not None:
-            object.__setattr__(weight_obj, "compress_statistics", None)
-            object.__setattr__(weight_obj, "quant_type", "nf4")
-            object.__setattr__(weight_obj, "quant_state", None)
+# NO PATCH NEEDED for 8-bit — prepare_model_for_kbit_training handles it
 
 model = get_peft_model(model, lora_config)
 
@@ -279,6 +225,7 @@ sft_config = SFTConfig(
     optim="paged_adamw_8bit",
     report_to="tensorboard",
     dataset_text_field="text",
+    max_length=Config.max_length,
     # NOTHING ELSE — no max_seq_length, no packing
 )
 
