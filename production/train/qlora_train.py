@@ -11,7 +11,6 @@ _original_prepare = peft.utils.other.prepare_model_for_kbit_training
 def patched_prepare(model, use_gradient_checkpointing=True, gradient_checkpointing_kwargs=None):
     if use_gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs or {})
-    # Enable input gradients without fp32 cast
     if hasattr(model, "get_input_embeddings"):
         def make_inputs_require_grad(module, input, output):
             output.requires_grad_(True)
@@ -30,11 +29,8 @@ from transformers import (
     TrainerCallback,
     Gemma4ForCausalLM
 )
-from peft import (
-    LoraConfig,
-    get_peft_model,
-    prepare_model_for_kbit_training
-)
+from peft import LoraConfig, get_peft_model
+# DO NOT import prepare_model_for_kbit_training here
 from datasets import load_dataset, concatenate_datasets, Dataset
 
 MODEL_ID = "google/gemma-4-E2B-it"
@@ -102,8 +98,8 @@ torch.cuda.empty_cache()
 # 3. PREPARE FOR QLORA
 # =========================
 
-# Now prepare_model_for_kbit_training won't find anything to cast to fp32
-model = prepare_model_for_kbit_training(
+# Use the patched version via module, not imported function
+model = peft.utils.other.prepare_model_for_kbit_training(
     model,
     use_gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False}
