@@ -14,8 +14,19 @@ from transformers import (
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 from peft import LoraConfig, get_peft_model
 from datasets import load_dataset, concatenate_datasets, Dataset
+import bitsandbytes as bnb
 
 MODEL_ID = "google/gemma-4-E2B-it"
+
+# PATCH: Fix Int8Params constructor for PEFT compatibility
+_original_int8_new = bnb.nn.Int8Params.__new__
+
+def patched_int8_new(cls, data, requires_grad=False, **kwargs):
+    # Remove _is_hf_initialized if present
+    kwargs.pop('_is_hf_initialized', None)
+    return _original_int8_new(cls, data, requires_grad=requires_grad, **kwargs)
+
+bnb.nn.Int8Params.__new__ = staticmethod(patched_int8_new)
 
 # =========================
 # 1. CONFIG
@@ -41,25 +52,26 @@ class Config:
     lora_dropout = 0.05
 
 # =========================
-# 2. LOAD MODEL (4-bit)
+# 2. LOAD MODEL (8-bit)
 # =========================
 print("Loading Gemma 4-E2B...")
 
 bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_quant_type="nf4",
+    load_in_8bit=True,
+    llm_int8_threshold=6.0,
+    llm_int8_skip_modules=["lm_head"]
 )
 
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto",
-    torch_dtype=torch.bfloat16,
+    device_map="balanced_low_0",
+    torch_dtype=torch.float16,
+    attn_implementation="eager",
     trust_remote_code=True
 )
 
-# CRITICAL FIX: Unwrap Gemma4ClippableLinear for PEFT compatibility
+# CRITICAL: Unwrap ALL Gemma4ClippableLinear layers
 print("Unwrapping ClippableLinear layers...")
 for name, module in list(model.named_modules()):
     if isinstance(module, Gemma4ClippableLinear):
@@ -69,13 +81,16 @@ for name, module in list(model.named_modules()):
             parent = getattr(parent, part)
         setattr(parent, parts[-1], module.linear)
 
-# Drop vision tower (not needed for text-only)
+# Drop vision and audio towers (text-only training)
 model.vision_tower = None
+model.audio_tower = None
 model.config.vision_config = None
+model.config.audio_config = None
+
 gc.collect()
 torch.cuda.empty_cache()
 
-# Manual gradient checkpointing (no prepare_model_for_kbit_training needed)
+# Manual prep (no prepare_model_for_kbit_training to avoid OOM)
 model.gradient_checkpointing_enable(
     gradient_checkpointing_kwargs={"use_reentrant": False}
 )
@@ -100,7 +115,7 @@ tokenizer.model_max_length = Config.max_length
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    target_modules=["q_proj", "v_proj"],  # Text decoder only, no .linear
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
