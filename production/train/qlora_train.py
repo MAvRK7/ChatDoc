@@ -60,7 +60,7 @@ bnb_config = BitsAndBytesConfig(
 model = Gemma4ForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto",
+    device_map="cuda:0",
     torch_dtype=torch.bfloat16,
     attn_implementation="sdpa",
     trust_remote_code=True
