@@ -32,8 +32,8 @@ class Config:
 
     # Training
     batch_size = 1
-    grad_accum_steps = 8
-    max_length = 512 # 1024
+    grad_accum_steps = 16 #8
+    max_length = 256 # 1024
     lr = 2e-4
     weight_decay = 0.01
     warmup_steps = 100
@@ -42,8 +42,8 @@ class Config:
     log_every = 25
 
     # LoRA
-    lora_r = 16 # 32
-    lora_alpha = 8 # 16
+    lora_r = 8 # 32
+    lora_alpha = 4 # 16
     lora_dropout = 0.05
 
 # =========================
@@ -91,7 +91,7 @@ tokenizer.model_max_length = Config.max_length
 lora_config = LoraConfig(
     r=Config.lora_r,
     lora_alpha=Config.lora_alpha,
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    target_modules=["q_proj", "v_proj"],
     lora_dropout=Config.lora_dropout,
     bias="none",
     task_type="CAUSAL_LM",
