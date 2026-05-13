@@ -57,7 +57,14 @@ tokenizer.model_max_length = Config.max_length
 
 # =========================
 # DATASET
+# Cache check: verify state.json exists inside the directory.
+# os.path.exists() on the directory alone passes even when empty
+# or partially copied — state.json is written last by save_to_disk
+# so its presence confirms a complete, valid cache.
 # =========================
+
+def cache_is_valid(path):
+    return os.path.isfile(os.path.join(path, "state.json"))
 
 def build_and_cache_dataset():
 
@@ -94,7 +101,7 @@ def build_and_cache_dataset():
                 try:
                     data.append(json.loads(line))
                 except json.JSONDecodeError as e:
-                    print(f"⚠️  Skipping bad line {i}: {e}")
+                    print(f"Warning: Skipping bad line {i}: {e}")
         return data
 
     print("Loading UltraChat...")
@@ -127,7 +134,6 @@ def build_and_cache_dataset():
         tokenize_dataset,
         remove_columns=["text"],
         desc="Tokenizing",
-        # no num_proc — Kaggle deadlocks with multiprocessing
     )
 
     os.makedirs(Config.tokenized_cache, exist_ok=True)
@@ -135,11 +141,12 @@ def build_and_cache_dataset():
     print(f"Saved tokenized dataset to {Config.tokenized_cache}")
     return combined
 
-if os.path.exists(Config.tokenized_cache):
-    print(f"Loading cached dataset from {Config.tokenized_cache}...")
+if cache_is_valid(Config.tokenized_cache):
+    print(f"Valid cache found — loading from {Config.tokenized_cache}...")
     combined = Dataset.load_from_disk(Config.tokenized_cache)
-    print(f"Loaded {len(combined):,} samples.")
+    print(f"Loaded {len(combined):,} samples. Skipping tokenization.")
 else:
+    print(f"No valid cache at {Config.tokenized_cache} — building...")
     combined = build_and_cache_dataset()
 
 # =========================
@@ -151,7 +158,7 @@ print("Loading Gemma 4 E2B...")
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,   # float16 only — bf16 crashes T4 AMP scaler
+    bnb_4bit_compute_dtype=torch.float16,
     bnb_4bit_use_double_quant=True,
 )
 
@@ -192,28 +199,26 @@ def unwrap_clippable_linears(model):
 model = unwrap_clippable_linears(model)
 
 # =========================
-# FREEZE + FULL BF16 PURGE
+# FREEZE + NORM UPCAST + BF16 AUDIT
 # =========================
 
 for param in model.parameters():
     param.requires_grad = False
 
-# Upcast norms to float32 only
 for name, param in model.named_parameters():
     if "norm" in name:
         param.data = param.data.to(torch.float32)
 
-# Full bf16 audit — convert any straggler tensors to float16
-bf16_found = 0
+bf16_count = 0
 for name, param in model.named_parameters():
     if param.data.dtype == torch.bfloat16:
         param.data = param.data.to(torch.float16)
-        bf16_found += 1
+        bf16_count += 1
 for name, buf in model.named_buffers():
     if buf.dtype == torch.bfloat16:
         buf.data = buf.data.to(torch.float16)
-        bf16_found += 1
-print(f"BF16 audit: converted {bf16_found} tensors to float16." if bf16_found else "BF16 audit: clean.")
+        bf16_count += 1
+print(f"BF16 audit: converted {bf16_count} tensors." if bf16_count else "BF16 audit: clean.")
 
 model.config.use_cache = False
 model.enable_input_require_grads()
@@ -225,9 +230,7 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # =========================
-# DISCOVER LORA TARGET MODULES
-# Print all unique linear layer leaf names so we can see what
-# Gemma 4 actually calls its projections after unwrapping.
+# LORA TARGET DISCOVERY
 # =========================
 
 linear_names = set()
@@ -235,9 +238,8 @@ for name, module in model.named_modules():
     if isinstance(module, torch.nn.Linear):
         linear_names.add(name.split(".")[-1])
 
-print(f"All linear leaf names found: {sorted(linear_names)}")
+print(f"All linear leaf names: {sorted(linear_names)}")
 
-# Target attention + MLP projections; skip lm_head and embed_tokens
 LORA_TARGETS = [
     n for n in linear_names
     if any(kw in n for kw in [
@@ -247,12 +249,8 @@ LORA_TARGETS = [
 ]
 
 if not LORA_TARGETS:
-    # Fallback if Gemma 4 uses non-standard projection names
-    LORA_TARGETS = [
-        n for n in linear_names
-        if n not in {"lm_head", "embed_tokens"}
-    ]
-    print(f"⚠️  No standard proj names found, falling back to: {sorted(LORA_TARGETS)}")
+    LORA_TARGETS = [n for n in linear_names if n not in {"lm_head", "embed_tokens"}]
+    print(f"Fallback LoRA targets: {sorted(LORA_TARGETS)}")
 else:
     print(f"LoRA targets: {sorted(LORA_TARGETS)}")
 
@@ -271,7 +269,6 @@ lora_config = LoraConfig(
 
 model = get_peft_model(model, lora_config)
 
-# Cast LoRA weights to float16
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
@@ -279,13 +276,12 @@ for name, param in model.named_parameters():
 
 model.print_trainable_parameters()
 
-# Final sanity check: no bf16 in trainable params
-bad = [(n, p.dtype) for n, p in model.named_parameters()
-       if p.requires_grad and p.dtype == torch.bfloat16]
-if bad:
-    print(f"⚠️  bf16 trainable params still present: {bad}")
+bad_params = [(n, p.dtype) for n, p in model.named_parameters()
+              if p.requires_grad and p.dtype == torch.bfloat16]
+if bad_params:
+    print(f"BF16 trainable params still present: {bad_params}")
 else:
-    print("✓ All trainable params are float16 — no bf16 leaks.")
+    print("All trainable params are float16.")
 
 gc.collect()
 torch.cuda.empty_cache()
@@ -351,11 +347,22 @@ class GenerateTextCallback(TrainerCallback):
                     top_p=0.9,
                 )
                 text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            print(f"\n=== Sample at step {state.global_step:,} ===\n{text}\n")
+            print(f"Sample at step {state.global_step:,}:\n{text}\n")
             m.train()
 
 # =========================
 # TRAINING
+#
+# The "_amp_foreach_non_finite_check_and_unscale_cuda not implemented
+# for BFloat16" error comes from bitsandbytes internals on certain
+# versions — the 4-bit dequantization forward pass emits bf16 activations
+# that propagate into the HF AMP loss scaler. Our parameter audit is
+# clean, but the scaler sees bf16 in the *activation* graph, not params.
+#
+# Fix: disable AMP entirely (fp16=False, bf16=False).
+# bitsandbytes manages its own precision for quantized ops.
+# The optimizer (paged_adamw_8bit) runs in its own precision.
+# Net effect: ~10-15% slower per step vs fp16 AMP, but it actually runs.
 # =========================
 
 sft_config = SFTConfig(
@@ -372,7 +379,8 @@ sft_config = SFTConfig(
     save_strategy               = "steps",
     save_steps                  = Config.eval_every,
     save_total_limit            = 3,
-    fp16                        = True,
+    fp16                        = False,
+    bf16                        = False,
     optim                       = "paged_adamw_8bit",
     report_to                   = "tensorboard",
     dataset_text_field          = None,
