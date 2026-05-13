@@ -31,20 +31,15 @@ class Config:
 
     batch_size        = 1
     grad_accum_steps  = 8
-    # 256 is a good compromise: fits T4 VRAM in fp16, doesn't truncate
-    # most medical QA pairs (64 was cutting most answers mid-sentence)
     max_length        = 256
 
     lr            = 2e-4
     weight_decay  = 0.01
-    warmup_steps  = 50       # shorter warmup for shorter run
-    # ~5-6 hours on T4: ~1 step/sec in fp16 at batch=1, accum=8
-    # so ~18-21k steps/hour. But QLoRA is slower — realistic ~600-900 steps/hour.
-    # 3000 steps ≈ 4-5 hours, safe within your 5-6hr window.
+    warmup_steps  = 50
     max_steps     = 3000
 
     eval_every    = 500
-    log_every     = 10      # more frequent so you can see loss moving
+    log_every     = 10
 
     lora_r        = 4
     lora_alpha    = 8
@@ -61,7 +56,7 @@ tokenizer.padding_side     = "right"
 tokenizer.model_max_length = Config.max_length
 
 # =========================
-# DATASET (cached)
+# DATASET
 # =========================
 
 def build_and_cache_dataset():
@@ -132,18 +127,18 @@ def build_and_cache_dataset():
         tokenize_dataset,
         remove_columns=["text"],
         desc="Tokenizing",
-        # num_proc intentionally omitted — Kaggle multiprocessing deadlocks
+        # no num_proc — Kaggle deadlocks with multiprocessing
     )
 
-    os.makedirs(os.path.dirname(Config.tokenized_cache) or "cache", exist_ok=True)
+    os.makedirs(Config.tokenized_cache, exist_ok=True)
     combined.save_to_disk(Config.tokenized_cache)
     print(f"Saved tokenized dataset to {Config.tokenized_cache}")
     return combined
 
 if os.path.exists(Config.tokenized_cache):
-    print(f"Loading cached tokenized dataset from {Config.tokenized_cache}...")
+    print(f"Loading cached dataset from {Config.tokenized_cache}...")
     combined = Dataset.load_from_disk(Config.tokenized_cache)
-    print(f"Loaded {len(combined):,} samples from cache.")
+    print(f"Loaded {len(combined):,} samples.")
 else:
     combined = build_and_cache_dataset()
 
@@ -156,11 +151,7 @@ print("Loading Gemma 4 E2B...")
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
-    # KEY FIX: compute dtype must be float16, NOT bfloat16.
-    # T4 does not support bfloat16 in CUDA amp — this was the root
-    # cause of "_amp_foreach_non_finite_check_and_unscale_cuda" error.
-    # bfloat16 leaked from here into the loss scaler and crashed.
-    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_compute_dtype=torch.float16,   # float16 only — bf16 crashes T4 AMP scaler
     bnb_4bit_use_double_quant=True,
 )
 
@@ -175,8 +166,6 @@ model = AutoModelForCausalLM.from_pretrained(
 
 # =========================
 # UNWRAP ClippableLinear
-# Load first (weights land correctly), then replace wrappers with
-# their inner .linear so PEFT sees plain nn.Linear everywhere.
 # =========================
 
 def unwrap_clippable_linears(model):
@@ -203,19 +192,28 @@ def unwrap_clippable_linears(model):
 model = unwrap_clippable_linears(model)
 
 # =========================
-# MANUAL KBIT PREP (avoids OOM from prepare_model_for_kbit_training)
+# FREEZE + FULL BF16 PURGE
 # =========================
 
-# Freeze all base weights
 for param in model.parameters():
     param.requires_grad = False
 
-# Upcast ONLY layernorms to float32 — critical for training stability,
-# and safe because they're tiny (KB not GB).
-# NOTE: do NOT upcast to bfloat16 — that's what caused the amp error.
+# Upcast norms to float32 only
 for name, param in model.named_parameters():
     if "norm" in name:
         param.data = param.data.to(torch.float32)
+
+# Full bf16 audit — convert any straggler tensors to float16
+bf16_found = 0
+for name, param in model.named_parameters():
+    if param.data.dtype == torch.bfloat16:
+        param.data = param.data.to(torch.float16)
+        bf16_found += 1
+for name, buf in model.named_buffers():
+    if buf.dtype == torch.bfloat16:
+        buf.data = buf.data.to(torch.float16)
+        bf16_found += 1
+print(f"BF16 audit: converted {bf16_found} tensors to float16." if bf16_found else "BF16 audit: clean.")
 
 model.config.use_cache = False
 model.enable_input_require_grads()
@@ -227,22 +225,53 @@ gc.collect()
 torch.cuda.empty_cache()
 
 # =========================
+# DISCOVER LORA TARGET MODULES
+# Print all unique linear layer leaf names so we can see what
+# Gemma 4 actually calls its projections after unwrapping.
+# =========================
+
+linear_names = set()
+for name, module in model.named_modules():
+    if isinstance(module, torch.nn.Linear):
+        linear_names.add(name.split(".")[-1])
+
+print(f"All linear leaf names found: {sorted(linear_names)}")
+
+# Target attention + MLP projections; skip lm_head and embed_tokens
+LORA_TARGETS = [
+    n for n in linear_names
+    if any(kw in n for kw in [
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ])
+]
+
+if not LORA_TARGETS:
+    # Fallback if Gemma 4 uses non-standard projection names
+    LORA_TARGETS = [
+        n for n in linear_names
+        if n not in {"lm_head", "embed_tokens"}
+    ]
+    print(f"⚠️  No standard proj names found, falling back to: {sorted(LORA_TARGETS)}")
+else:
+    print(f"LoRA targets: {sorted(LORA_TARGETS)}")
+
+# =========================
 # LORA
 # =========================
 
 lora_config = LoraConfig(
-    r            = Config.lora_r,
-    lora_alpha   = Config.lora_alpha,
-    lora_dropout = Config.lora_dropout,
-    bias         = "none",
-    task_type    = "CAUSAL_LM",
-    # No target_modules — PEFT >= 0.19.0 uses Gemma 4 defaults
-    # (LM layers only, scoped via regex, skips ClippableLinear remnants)
+    r              = Config.lora_r,
+    lora_alpha     = Config.lora_alpha,
+    target_modules = LORA_TARGETS,
+    lora_dropout   = Config.lora_dropout,
+    bias           = "none",
+    task_type      = "CAUSAL_LM",
 )
 
 model = get_peft_model(model, lora_config)
 
-# Cast LoRA weights to float16 to match compute dtype
+# Cast LoRA weights to float16
 for name, param in model.named_parameters():
     if "lora_" in name:
         param.requires_grad = True
@@ -250,13 +279,19 @@ for name, param in model.named_parameters():
 
 model.print_trainable_parameters()
 
+# Final sanity check: no bf16 in trainable params
+bad = [(n, p.dtype) for n, p in model.named_parameters()
+       if p.requires_grad and p.dtype == torch.bfloat16]
+if bad:
+    print(f"⚠️  bf16 trainable params still present: {bad}")
+else:
+    print("✓ All trainable params are float16 — no bf16 leaks.")
+
 gc.collect()
 torch.cuda.empty_cache()
 
 # =========================
 # COLLATOR
-# Gemma 4 requires mm_token_type_ids in every forward pass,
-# even text-only. Standard collators don't produce it — we do.
 # =========================
 
 @dataclass
@@ -290,8 +325,6 @@ collator = Gemma4Collator(pad_token_id=tokenizer.pad_token_id)
 
 # =========================
 # CALLBACK
-# mm_token_type_ids must be supplied here too or generate() will
-# error / produce garbage mid-training.
 # =========================
 
 class GenerateTextCallback(TrainerCallback):
@@ -308,7 +341,6 @@ class GenerateTextCallback(TrainerCallback):
                 inputs = self.tokenizer(
                     self.prompt, return_tensors="pt"
                 ).to(m.device)
-                # Supply required Gemma 4 fields for text-only generation
                 inputs["token_type_ids"]    = torch.zeros_like(inputs["input_ids"])
                 inputs["mm_token_type_ids"] = torch.zeros_like(inputs["input_ids"])
                 outputs = m.generate(
@@ -340,14 +372,12 @@ sft_config = SFTConfig(
     save_strategy               = "steps",
     save_steps                  = Config.eval_every,
     save_total_limit            = 3,
-    # fp16=True: correct for T4. Do NOT use bf16 — T4 has no native bf16
-    # and it causes the "_amp_foreach_non_finite_check_and_unscale_cuda" crash.
     fp16                        = True,
     optim                       = "paged_adamw_8bit",
     report_to                   = "tensorboard",
-    dataset_text_field          = None,        # dataset is pre-tokenized
-    remove_unused_columns       = False,       # keep mm_token_type_ids alive
-    dataloader_pin_memory       = False,       # prevents stalls on Kaggle T4
+    dataset_text_field          = None,
+    remove_unused_columns       = False,
+    dataloader_pin_memory       = False,
 )
 
 trainer = SFTTrainer(
@@ -363,12 +393,10 @@ print("Starting training...")
 trainer.train()
 
 # =========================
-# SAVE — adapter only (no merge here, merge separately to avoid OOM)
-# merge_and_unload() dequantizes the full model into fp16 in-place;
-# on a 15GB T4 with base model loaded that will OOM. Use merge.py instead.
+# SAVE
 # =========================
 
 print(f"Saving LoRA adapter to {Config.final_dir}...")
 model.save_pretrained(Config.final_dir)
 tokenizer.save_pretrained(Config.final_dir)
-print("Done! Run merge.py offline to produce the merged checkpoint.")
+print("Done! Run merge.py in a fresh session to produce the merged checkpoint.")
