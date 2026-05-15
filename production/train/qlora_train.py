@@ -64,7 +64,7 @@ tokenizer.model_max_length = Config.max_length
 # =========================
 
 def cache_is_valid(path):
-    return os.path.isfile(os.path.join(path, "state.json"))
+    return os.path.isdir(path) and len(glob.glob(os.path.join(path, "*.arrow"))) > 0
 
 def build_and_cache_dataset():
 
