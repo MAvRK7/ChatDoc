@@ -3,6 +3,7 @@ import json
 import gc
 import glob
 import torch
+torch.backends.cudnn.benchmark = True
 from dataclasses import dataclass
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -18,7 +19,7 @@ from peft import LoraConfig, get_peft_model
 from datasets import load_dataset, concatenate_datasets, Dataset
 
 # =========================
-# CONFIG
+# CONFIG — same values as the run that worked at 9s/step
 # =========================
 
 MODEL_ID = "google/gemma-4-E2B-it"
@@ -26,22 +27,22 @@ MODEL_ID = "google/gemma-4-E2B-it"
 class Config:
     ultrachat_path   = "data/processed/train.jsonl"
     medical_path     = "data/finetune/train_deduped.jsonl"
-    output_dir       = "checkpoints/gemma-lora"       # trainer saves here every eval_every steps
-    final_dir        = "checkpoints/gemma-lora-final" # manual adapter save at end
+    output_dir       = "checkpoints/gemma-lora"
+    final_dir        = "checkpoints/gemma-lora-final"
     tokenized_cache  = "cache/tokenized_dataset"
 
     batch_size        = 1
     grad_accum_steps  = 8
-    max_length        = 256
+    max_length        = 128
 
     lr            = 2e-4
     weight_decay  = 0.01
     warmup_steps  = 50
-    max_steps     = 10000   # high ceiling — resume will pick up from last checkpoint
+    max_steps     = 3000   # ~7.5 hrs at 9s/step; kill manually when done
 
-    eval_every    = 200     # save every 200 steps so you never lose more than ~30 min
-    save_total    = 5       # keep last 5 checkpoints
-    log_every     = 10
+    eval_every    = 500    # checkpoint every ~30 min
+    save_total    = 5
+    log_every     = 20
 
     lora_r        = 4
     lora_alpha    = 8
@@ -58,9 +59,8 @@ tokenizer.padding_side     = "right"
 tokenizer.model_max_length = Config.max_length
 
 # =========================
-# DATASET — cache-aware
-# Checks for state.json which is written LAST by save_to_disk,
-# so its presence guarantees a fully written, loadable dataset.
+# DATASET — skips tokenization if valid cache exists
+# Uses state.json as the completion marker (written last by save_to_disk)
 # =========================
 
 def cache_is_valid(path):
@@ -134,7 +134,6 @@ def build_and_cache_dataset():
         tokenize_dataset,
         remove_columns=["text"],
         desc="Tokenizing",
-        # no num_proc — Kaggle multiprocessing deadlocks
     )
 
     os.makedirs(Config.tokenized_cache, exist_ok=True)
@@ -147,30 +146,24 @@ if cache_is_valid(Config.tokenized_cache):
     combined = Dataset.load_from_disk(Config.tokenized_cache)
     print(f"Loaded {len(combined):,} samples. Skipping tokenization.")
 else:
-    print("No valid cache found — building dataset from scratch...")
+    print("No valid cache — building dataset...")
     combined = build_and_cache_dataset()
 
 # =========================
-# AUTO-RESUME: find latest checkpoint
-# Scans output_dir for checkpoint-N folders and returns the highest N.
-# The Trainer's resume_from_checkpoint=True does the same thing but
-# only works if output_dir already has checkpoints — this makes it
-# explicit and prints clearly what's happening.
+# AUTO-RESUME
+# Finds highest-numbered checkpoint-N in output_dir.
+# Passed to trainer.train() so optimizer state + step count resume too.
 # =========================
 
 def find_latest_checkpoint(output_dir):
     if not os.path.isdir(output_dir):
         return None
-    checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
-    if not checkpoints:
+    ckpts = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+    if not ckpts:
         return None
-    # Sort by step number
-    checkpoints = sorted(
-        checkpoints,
-        key=lambda x: int(x.split("-")[-1])
-    )
-    latest = checkpoints[-1]
-    print(f"Found {len(checkpoints)} checkpoint(s). Resuming from: {latest}")
+    ckpts = sorted(ckpts, key=lambda x: int(x.split("-")[-1]))
+    latest = ckpts[-1]
+    print(f"Resuming from checkpoint: {latest}")
     return latest
 
 resume_from = find_latest_checkpoint(Config.output_dir)
@@ -179,10 +172,6 @@ if resume_from is None:
 
 # =========================
 # MODEL
-# device_map="auto" splits layers across both T4s (model parallelism).
-# This gives 32GB combined VRAM headroom instead of 16GB.
-# It does NOT give 2x training speed — that needs DDP/FSDP which is
-# incompatible with bitsandbytes 4-bit in a Kaggle notebook.
 # =========================
 
 print("Loading Gemma 4 E2B...")
@@ -197,7 +186,7 @@ bnb_config = BitsAndBytesConfig(
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     quantization_config=bnb_config,
-    device_map="auto",          # splits across both T4s automatically
+    device_map="auto",
     torch_dtype=torch.float16,
     attn_implementation="eager",
     trust_remote_code=True,
@@ -213,18 +202,15 @@ def unwrap_clippable_linears(model):
         ClippableLinear = getattr(modeling_gemma4, "Gemma4ClippableLinear", None)
     except ImportError:
         ClippableLinear = None
-
     if ClippableLinear is None:
-        print("Gemma4ClippableLinear not found — skipping unwrap.")
+        print("Gemma4ClippableLinear not found — skipping.")
         return model
-
     replaced = 0
-    for _, parent_module in list(model.named_modules()):
-        for child_name, child_module in list(parent_module.named_children()):
-            if isinstance(child_module, ClippableLinear):
-                setattr(parent_module, child_name, child_module.linear)
+    for _, parent in list(model.named_modules()):
+        for child_name, child in list(parent.named_children()):
+            if isinstance(child, ClippableLinear):
+                setattr(parent, child_name, child.linear)
                 replaced += 1
-
     print(f"Unwrapped {replaced} Gemma4ClippableLinear modules.")
     return model
 
@@ -237,12 +223,10 @@ model = unwrap_clippable_linears(model)
 for param in model.parameters():
     param.requires_grad = False
 
-# Upcast layernorms to float32 for stability (they are tiny — KB not GB)
 for name, param in model.named_parameters():
     if "norm" in name:
         param.data = param.data.to(torch.float32)
 
-# Full bf16 purge — catches any straggler tensors from HF loader
 bf16_count = 0
 for _, param in model.named_parameters():
     if param.data.dtype == torch.bfloat16:
@@ -256,15 +240,13 @@ print(f"BF16 audit: {'converted ' + str(bf16_count) + ' tensors' if bf16_count e
 
 model.config.use_cache = False
 model.enable_input_require_grads()
-model.gradient_checkpointing_enable(
-    gradient_checkpointing_kwargs={"use_reentrant": False}
-)
+model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
 gc.collect()
 torch.cuda.empty_cache()
 
 # =========================
-# LORA TARGET DISCOVERY
+# LORA
 # =========================
 
 linear_names = set()
@@ -272,25 +254,15 @@ for name, module in model.named_modules():
     if isinstance(module, torch.nn.Linear):
         linear_names.add(name.split(".")[-1])
 
-print(f"All linear leaf names: {sorted(linear_names)}")
-
 LORA_TARGETS = [
     n for n in linear_names
-    if any(kw in n for kw in [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-    ])
+    if any(kw in n for kw in ["q_proj","k_proj","v_proj","o_proj",
+                               "gate_proj","up_proj","down_proj"])
 ]
-
 if not LORA_TARGETS:
-    LORA_TARGETS = [n for n in linear_names if n not in {"lm_head", "embed_tokens"}]
-    print(f"Fallback LoRA targets: {sorted(LORA_TARGETS)}")
-else:
-    print(f"LoRA targets: {sorted(LORA_TARGETS)}")
+    LORA_TARGETS = [n for n in linear_names if n not in {"lm_head","embed_tokens"}]
 
-# =========================
-# LORA
-# =========================
+print(f"LoRA targets: {sorted(LORA_TARGETS)}")
 
 lora_config = LoraConfig(
     r              = Config.lora_r,
@@ -309,11 +281,6 @@ for name, param in model.named_parameters():
         param.data = param.data.to(torch.float16)
 
 model.print_trainable_parameters()
-
-bad = [(n, p.dtype) for n, p in model.named_parameters()
-       if p.requires_grad and p.dtype == torch.bfloat16]
-print(f"BF16 trainable leak: {bad}" if bad else "All trainable params are float16.")
-
 gc.collect()
 torch.cuda.empty_cache()
 
@@ -328,47 +295,34 @@ class Gemma4Collator:
     def __call__(self, features):
         max_len = max(len(f["input_ids"]) for f in features)
         pad_id  = self.pad_token_id
-
         batch = {k: [] for k in
-                 ["input_ids", "attention_mask",
-                  "token_type_ids", "mm_token_type_ids", "labels"]}
-
+                 ["input_ids","attention_mask","token_type_ids","mm_token_type_ids","labels"]}
         for f in features:
             seq_len = len(f["input_ids"])
             pad_len = max_len - seq_len
-
-            batch["input_ids"].append(
-                f["input_ids"] + [pad_id] * pad_len)
-            batch["attention_mask"].append(
-                [1] * seq_len + [0] * pad_len)
+            batch["input_ids"].append(f["input_ids"] + [pad_id] * pad_len)
+            batch["attention_mask"].append([1]*seq_len + [0]*pad_len)
             batch["token_type_ids"].append([0] * max_len)
             batch["mm_token_type_ids"].append([0] * max_len)
-            batch["labels"].append(
-                f.get("labels", f["input_ids"]) + [-100] * pad_len)
-
+            batch["labels"].append(f.get("labels", f["input_ids"]) + [-100]*pad_len)
         return {k: torch.tensor(v) for k, v in batch.items()}
 
 collator = Gemma4Collator(pad_token_id=tokenizer.pad_token_id)
 
 # =========================
-# GENERATION CALLBACK
-# Fixed: supplies mm_token_type_ids and uses a proper chat-formatted
-# prompt so the model actually generates coherent text.
-# The comma-repeating bug happened because the raw prompt "Once upon
-# a time," doesn't match the chat template the model was trained on.
+# CALLBACK — fixed generation
+# Uses proper chat template + decodes only new tokens
+# so output is coherent instead of repeating commas
 # =========================
 
 class GenerateTextCallback(TrainerCallback):
 
-    PROMPT = [
-        {"role": "user", "content": "What should I do if I have a fever?"}
-    ]
-
     def __init__(self, tokenizer, max_new_tokens=80):
-        self.tokenizer      = tokenizer
+        self.tokenizer = tokenizer
         self.max_new_tokens = max_new_tokens
-        self.prompt_text    = tokenizer.apply_chat_template(
-            self.PROMPT,
+        # Pre-format a medical question through the chat template
+        self.prompt_text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "What should I do if I have a fever?"}],
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -385,39 +339,28 @@ class GenerateTextCallback(TrainerCallback):
                         truncation=True,
                         max_length=64,
                     ).to(m.device)
-                    # Gemma 4 requires these even for text-only inference
                     inputs["token_type_ids"]    = torch.zeros_like(inputs["input_ids"])
                     inputs["mm_token_type_ids"] = torch.zeros_like(inputs["input_ids"])
-                    outputs = m.generate(
+                    out = m.generate(
                         **inputs,
                         max_new_tokens=self.max_new_tokens,
-                        do_sample=False,          # greedy — more stable for eval
+                        do_sample=False,
                         temperature=None,
                         top_p=None,
                         pad_token_id=self.tokenizer.pad_token_id,
                     )
-                    # Decode only the newly generated tokens
-                    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+                    new_tokens = out[0][inputs["input_ids"].shape[1]:]
                     text = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
-                print(f"\n=== Generation at step {state.global_step:,} ===")
-                print(f"Q: What should I do if I have a fever?")
-                print(f"A: {text}\n")
+                print(f"\n=== Step {state.global_step:,} | Q: fever? ===\nA: {text}\n")
             except Exception as e:
-                print(f"Generation failed at step {state.global_step}: {e}")
+                print(f"Generation skipped at step {state.global_step}: {e}")
             finally:
                 m.train()
 
 # =========================
 # TRAINING
-#
-# fp16=False, bf16=False: disables HF AMP loss scaler entirely.
-# This is required because bitsandbytes 4-bit dequantization emits
-# bf16 activations internally on certain bnb versions, which then
-# hit the T4's missing _amp_foreach_non_finite_check_and_unscale_cuda
-# CUDA kernel. Without AMP, bitsandbytes manages its own precision.
-# Cost: ~10-15% slower per step vs fp16 AMP. Benefit: it actually runs.
-#
-# resume_from_checkpoint: automatically picks up from latest checkpoint.
+# fp16/bf16 both False — disables HF AMP scaler which crashes on T4
+# when bnb 4-bit dequant emits bf16 activations internally
 # =========================
 
 sft_config = SFTConfig(
@@ -434,8 +377,8 @@ sft_config = SFTConfig(
     save_strategy               = "steps",
     save_steps                  = Config.eval_every,
     save_total_limit            = Config.save_total,
-    fp16                        = False,   # see note above
-    bf16                        = False,   # see note above
+    fp16                        = False,
+    bf16                        = False,
     optim                       = "paged_adamw_8bit",
     report_to                   = "tensorboard",
     dataset_text_field          = None,
@@ -455,13 +398,7 @@ trainer = SFTTrainer(
 print("Starting training...")
 trainer.train(resume_from_checkpoint=resume_from)
 
-# =========================
-# SAVE FINAL ADAPTER
-# Saves only the LoRA adapter weights — small and fast.
-# Use merge.py in a fresh session to produce the merged model.
-# =========================
-
-print(f"Saving final LoRA adapter to {Config.final_dir}...")
+print(f"Saving LoRA adapter to {Config.final_dir}...")
 model.save_pretrained(Config.final_dir)
 tokenizer.save_pretrained(Config.final_dir)
-print("Done! Run merge.py in a fresh session to produce the full merged model.")
+print("Done!")
