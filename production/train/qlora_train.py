@@ -29,7 +29,7 @@ class Config:
     medical_path     = "data/finetune/train_deduped.jsonl"
     output_dir       = "checkpoints/gemma-lora"
     final_dir        = "checkpoints/gemma-lora-final"
-    tokenized_cache  = "cache/tokenized_dataset_v2"  # new cache for new format
+    tokenized_cache  = "cache/tokenized_dataset_v3"  # new cache for new format
 
     batch_size        = 1
     grad_accum_steps  = 8
@@ -190,7 +190,9 @@ def score_medical_sample(example):
 # =========================
 
 def cache_is_valid(path):
-    return os.path.isdir(path) and len(glob.glob(os.path.join(path, "*.arrow"))) > 0
+    return os.path.exists(
+        os.path.join(path, "dataset_info.json")
+    )
 
 def build_and_cache_dataset():
     def load_jsonl_safe(path):
@@ -236,22 +238,135 @@ def build_and_cache_dataset():
     combined = concatenate_datasets([ultrachat, medical_repeated]).shuffle(seed=42)
     print(f"Total training samples: {len(combined):,}")
     
-    # Tokenize with masking
-    print("Tokenizing with assistant-only masking...")
+    # =========================
+    # SANITIZATION
+    # =========================
+
+    def sanitize_messages(messages):
+        """Ensure all messages have valid string content."""
+        if not messages or not isinstance(messages, list):
+            return []
+
+        cleaned = []
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+
+            role = msg.get("role", "user")
+            content = msg.get("content")
+
+            # Handle None or non-string content
+            if content is None:
+                content = ""
+
+            elif isinstance(content, list):
+                # Handle multimodal-style blocks
+                texts = []
+
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                    ):
+                        texts.append(block.get("text", ""))
+
+                content = " ".join(texts) if texts else ""
+
+            elif not isinstance(content, str):
+                content = str(content)
+
+            cleaned.append({
+                "role": role,
+                "content": content,
+            })
+
+        return cleaned
     
-    def tokenize_fn(example):
-        # Detect format by keys
+    def format_ultrachat(example):
+        messages = sanitize_messages(
+            example.get("messages", [])
+        )
+
+        if not messages:
+            return {"text": ""}
+
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+        return {
+            "text": text,
+            "messages": messages,
+        }
+
+
+    def format_medical(example):
+        messages = sanitize_messages([
+            {
+                "role": "system",
+                "content": str(example.get("instruction", "")),
+            },
+            {
+                "role": "user",
+                "content": str(example.get("input", "")),
+            },
+            {
+                "role": "assistant",
+                "content": str(example.get("output", "")),
+            },
+        ])
+
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+        return {
+            "text": text,
+            "messages": messages,
+        }
+
+    # =========================
+    # FORMAT DATA
+    # =========================
+
+    print("Formatting dataset...")  
+
+    def format_example(example):
         if "messages" in example:
-            messages = example["messages"]
+            return format_ultrachat(example)
         else:
-            messages = [
-                {"role": "system", "content": example["instruction"]},
-                {"role": "user", "content": example["input"]},
-                {"role": "assistant", "content": example["output"]},
-            ]
-        
-        return tokenize_with_assistant_masking(messages, tokenizer, Config.max_length)
-    
+            return format_medical(example)
+
+    combined = combined.map(
+        format_example,
+        desc="Formatting",
+    )
+
+    # Remove empty/broken samples
+    combined = combined.filter(
+        lambda x: len(x.get("text", "")) > 10
+    )
+
+    # =========================
+    # TOKENIZE WITH MASKING
+    # =========================
+
+    print("Tokenizing with assistant-only masking...")
+
+    def tokenize_fn(example):
+        messages = example["messages"]
+
+        return tokenize_with_assistant_masking(
+            messages,
+            tokenizer,
+            Config.max_length,
+        )
+
     combined = combined.map(
         tokenize_fn,
         remove_columns=combined.column_names,
