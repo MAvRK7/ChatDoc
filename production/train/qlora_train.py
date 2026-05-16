@@ -256,7 +256,6 @@ def build_and_cache_dataset():
         tokenize_fn,
         remove_columns=combined.column_names,
         desc="Tokenizing",
-        num_proc=4,  # parallel processing for speed
     )
     
     # Filter out samples where labels are all -100 (no assistant content)
