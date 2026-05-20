@@ -5,6 +5,7 @@ import glob
 import torch
 torch.backends.cudnn.benchmark = True
 from dataclasses import dataclass
+from transformers import AutoProcessor
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
