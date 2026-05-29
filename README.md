@@ -1,189 +1,161 @@
-# Aura-MoE
+# ChatDoc — AI Medical Assistant
 
-A Sparse Mixture-of-Experts Architecture from Scratch
+A production-ready medical chatbot API and React frontend, built on a fine-tuned Gemma 4 E2B model with dual quantization support for flexible deployment.
 
-## 🧾 Quick facts:
+## What It Does
 
-- Parameters: 138M (Architecture equivalent to a 250M–300M dense model)
-- Architecture: 12-layer Transformer with Interleaved Dense and MoE blocks.
-- MoE Config: 4 Experts with Top-1 Routing (k=1).
-- Context Length: 1024 token
-- Efficiency: Fits in 4GB VRAM at inference; trains in ~4 hours on an A100
-- Tokenizer: Custom 20k vocabulary SentencePiece model.
-- Uses RoPE (Rotary Positional Embeddings) and SwiGLU activators.
-
-Aura-MoE is a 138M parameter Transformer model implementing a sparse Mixture-of-Experts (MoE) layer. This project serves as a deep-dive into the engineering challenges of training MoE architectures, featuring custom implementations of modern LLM components like RoPE, SwiGLU, and FlashAttention.
-
-Other details:
-
-Has FlashAttention for speed, RMSNorm for stability, 20k sentancepiece tokenizer
-
-| Metric                              | Value        |
-|-------------------------------------|--------------|
-| Total samples (turn-level)          | 710,647      |
-| Total tokens (after truncation)     | 234,781,772  |
-| Trainable tokens (assistant only)   | 165,057,619  |
-| Average tokens per sample           | 330.38       |
-| Trainable ratio                     | 70.30%       |
-| Vocab size                          | 20,000       |
+ChatDoc answers general medical questions with concise, accurate responses. It supports both fast (Q4) and accurate (Q8) inference modes, selectable at query time.
 
 ---
-
-## 🏗️ Technical Architecture
-
-The model is built with a decoupled, modular design to allow for rapid experimentation with routing and expert scaling.  
-
-- Parameter Count: 138,534,912  
-
-- Layers: 12-layer Transformer (Interleaved Dense and MoE blocks)  
-
-- MoE Config: 4 Experts, Top-1 Routing (k=1)  
-
-- Hidden Dimension: 768  
-
-- Context Window: 1024 token
-
-### Key Engineering Features
-
-* Custom MoE Layer: Features a manual dispatch/combine logic with auxiliary load-balancing and Z-loss for gating stability.  
-
-* Rotary Positional Embeddings (RoPE): Implemented from scratch for better long-context performance.  
-
-* Optimized Inference: Includes a dedicated sampling engine with n-gram blocking and repetition penalty to manage semantic drift.  
-
-* Memory Efficiency: Built with torch.amp for mixed-precision training and gradient accumulation for larger effective batch sizes.
-
-## 📦 Dataset 
-
-A custom dataset has been created for pre-training this model. It consists of:
-
-| Dataset          | Samples | Percentage | Approx. Tokens |
-|------------------|---------|------------|----------------|
-| Ultra Chat       | 185,202 | 54.03%     | ~126M          |
-| Smol Summarize   | 101,428 | 29.59%     | ~69M           |
-| Smol Rewrite     | 56,150  | 16.38%     | ~39M           |
-
-Total dataset size: 342,780
-    - Train size: 324,900 samples (95%)
-    - Val size: 17,880 samples (5%)
-
----
-
-📂 File Structure 
+## Architecture
 
 ```text
+┌─────────────┐      HTTP/REST      ┌─────────────────┐
+│  React UI   │ ◄─────────────────► │  FastAPI (HF    │
+│  (Vercel)   │   OpenAI-compatible │  Spaces Docker) │
+└─────────────┘      streaming      └─────────────────┘
+                                            │
+                                     ┌──────┴──────┐
+                                     │  llama.cpp  │
+                                     │  Q4 / Q8    │
+                                     │  GGUF       │
+                                     └─────────────┘
+```
+---
+## Tech Stack
 
-├── src/
-│   ├── model/
-│   │   ├── transformer.py  # Core MoE Transformer & RoPE logic
-│   │   └── moe.py          # Expert dispatch & gating mechanism
-│   ├── dataset/            # Formatting & tokenization pipelines
-│   ├── engine/             # Training & Evaluation loops
-│   └── inference.py        # Generation with repetition penalties
-├── tokenizer/              # Custom SentencePiece model
-└── outputs/                # Tensorboard logs & OOD benchmarks
+```
+| Layer          | Tech                                   |
+| -------------- | -------------------------------------- |
+| **Frontend**   | React 18, Vite, TailwindCSS            |
+| **Backend**    | FastAPI, llama-cpp-python              |
+| **Model**      | Gemma 4 E2B + LoRA fine-tune           |
+| **Inference**  | llama.cpp (CPU-optimized)              |
+| **Deployment** | Hugging Face Spaces (API), Vercel (UI) |
+```
+---
+## Features
+
+- Dual Model Support — Switch between Q4 (fast) and Q8 (accurate) at runtime
+- Streaming Responses — Real-time token streaming with Server-Sent Events
+- OpenAI-Compatible API — Drop-in replacement for /v1/chat/completions
+- API Key Auth — Simple Bearer token authentication
+- Premium UI — Glass morphism, animated gradients, responsive design
+- Medical Disclaimer — Ethical AI usage notice on every interaction
+
+## Dual Support:
+```
+| Variable     | Value                     | Effect                  |
+| ------------ | ------------------------- | ----------------------- |
+| `MODEL_REPO` | `SatRag/chat-doctor-q4`   | Uses Q4 model           |
+| `MODEL_FILE` | `chat-doctor-q4.gguf`     | Q4 filename             |
+| `MODEL_REPO` | `SatRag/chat-doctor-gguf` | Uses Q8 model (default) |
+| `MODEL_FILE` | `chat-doctor.gguf`        | Q8 filename             |
+```
+---
+
+## Quick Start
+
+### Backend (HF Spaces)
+
+1. Fork or clone this repo
+2. Set environment variables in Space settings:
+    - HF_TOKEN — your Hugging Face token
+    - API_KEY — set your own key (default: test-key-123)
+    - DEFAULT_MODEL — chat-doctor-q4 or chat-doctor-q8
+
+3. Deploy to Hugging Face Spaces (Docker SDK)
+
+### Frontend (Local)
+
+```
+cd chat-doctor-frontend
+npm install
+npm run dev
+```
+
+### Frontend (Production)
+```
+npm run build
+vercel --prod
+```
+---
+## API Usage
+
+```
+curl -X POST https://SatRag-chat-doctor-api.hf.space/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-key-123" \
+  -d '{
+    "model": "chat-doctor-q4",
+    "messages": [{"role": "user", "content": "What causes migraines?"}],
+    "stream": true,
+    "max_tokens": 160,
+    "temperature": 0.3
+  }'
+
+```
+---
+## Model Details
+```
+| Spec               | Value                                           |
+| ------------------ | ----------------------------------------------- |
+| Base Model         | `google/gemma-4-E2B-it`                         |
+| Fine-tuning        | LoRA on medical Q\&A + curated instruction data |
+| Parameters         | 4B                                              |
+| Quantizations      | Q4\_K\_M (~2.5GB), Q8\_0 (~5GB)                 |
+| Context Length     | 2048 tokens                                     |
+| Training Framework | TRL SFTTrainer with assistant-only masking      |
+```
+
+## Project Structure 
+
+```
+├── app.py                    # FastAPI server
+├── config.py                 # Model & generation config
+├── Dockerfile                # HF Spaces build
+├── requirements.txt
+└── chat-doctor-frontend/
+    ├── src/
+    │   ├── App.jsx
+    │   ├── components/
+    │   │   ├── ChatMessage.jsx
+    │   │   ├── ChatInput.jsx
+    │   │   ├── Header.jsx
+    │   │   ├── InfoModal.jsx
+    │   │   ├── SuggestionCards.jsx
+    │   │   └── ThinkingIndicator.jsx
+    │   └── hooks/
+    │       └── useChatStream.js
+    ├── index.html
+    ├── package.json
+    └── tailwind.config.js
+```
+---
+## Env Variables
+
+```
+| Variable        | Default          | Description                        |
+| --------------- | ---------------- | ---------------------------------- |
+| `HF_TOKEN`      | —                | Hugging Face auth token            |
+| `API_KEY`       | `test-key-123`   | API authentication key             |
+| `DEFAULT_MODEL` | `chat-doctor-q4` | Default model on startup           |
+| `MODEL_REPO`    | —                | Override HF repo for custom models |
+| `MODEL_FILE`    | —                | Override GGUF filename             |
 
 ```
 ---
 
-## 🛠️ Installation
+## Limitations
 
-### 1️⃣ Clone the repository
-
-```git 
-git clone https://github.com/MAvRK7/chat-doctor.git
-cd chat-doctor
-```
-### 2️⃣ Create and activate a virtual environment:
-
-```
-python -m venv venv
-source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
-```
-### 3️⃣ Install dependencies
-
-```
-pip install -r requirements.txt
-```
-### 4️⃣ Dataset Setup
-
-
-1. Download the dataset
-
-Download train.csv manually from:
-
-[train dataset](https://www.kaggle.com/datasets/satvikraghav/cleaned-anon-jsonl/data?select=train.jsonl)
-
-[validation dataset](https://www.kaggle.com/datasets/satvikraghav/cleaned-anon-jsonl/data?select=val.jsonl)
-
-2. Place the file
-
-Move the downloaded train file to:
-
-```
-data/processed/train.jsonl
-```
-
-and place the val dataset in 
-
-```
-data/processed/val.jsonl
-```
-
-The split in the train dataset (train.jsonl) into train (95%) and validation (val.jsonl) is a 95/5 split 
-
-
-⚠️ Note: All the # ignored tagged files are ignored in Git due to file size limits, so you must download the dataset locally before running the project.
-
+- CPU-only inference — Responses take 5-15 seconds depending on length
+- Not a substitute for professional medical advice — Always consult a doctor for serious symptoms
+- General health Q&A only — No diagnosis, prescriptions, or emergency guidance
 
 ---
 
-The Pretraining phase I model weights are available at 
+## Acknowledgments
 
-[model.pt](https://www.kaggle.com/datasets/satvikraghav/chat-doctor-checkpoints/data)
-
-Once trained, it should be placed in the project root.
-
----
-
-Training details on TensorBoard
-
-Place the tfevents in 
-
-```
-outputs/runs
-```
-
-Run
-
-```
-cd /Users/satvikraghav/coding/chat-doctor
-tensorboard --logdir outputs/runs
-```
-
-This will generate a link
-```
-http://localhost:6006/
-```
-on which the trainig charts will be visible. Available charts are:
-
-Train:
-
-train/ce_loss, train/loss, train/lr, train/moe_loss
-
-Val:
-
-val/loss, val and val/perplexity
-
-The text generated during trining stages will also be visible in the Text section.
----
-
-Note:
-
-Due to compute constraints (30k steps on ~0.5B tokens), the current checkpoint demonstrates high syntactic fluency and assistant-persona alignment but remains in the "early-convergence" phase regarding factual grounding
-
-Sample Output
-
-User: Explain AI in education?
-
-Assistant: The first step in the future of your life was to have a significant impact on our lives. Its life has been a crucial part of you, and it has had a positive impact on you. In this time, I have made you feel more confident in my life. It's a great way to focus on the life that we can do, and that we are all about the most importantly in our lives and how we can make a difference in your life. Let me know if you have any questions or need it?
+- llama.cpp for efficient CPU inference
+- Hugging Face for model hosting and Spaces
+- Google for the Gemma 4 model family
