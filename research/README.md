@@ -193,9 +193,3 @@ Assistant: The first step in the future of your life was to have a significant i
 Note:
 
 Due to compute constraints (30k steps on ~0.5B tokens), the current checkpoint demonstrates high syntactic fluency and assistant-persona alignment but remains in the "early-convergence" phase regarding factual grounding
-
-Sample Output
-
-User: Explain AI in education?
-
-Assistant: The first step in the future of your life was to have a significant impact on our lives. Its life has been a crucial part of you, and it has had a positive impact on you. In this time, I have made you feel more confident in my life. It's a great way to focus on the life that we can do, and that we are all about the most importantly in our lives and how we can make a difference in your life. Let me know if you have any questions or need it?
