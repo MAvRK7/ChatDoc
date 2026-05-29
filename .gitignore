@@ -230,3 +230,5 @@ Thumbs.db
 
 scripts/finetune
 checkpoints/model.pt
+
+node_modules/
