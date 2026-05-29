@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from llama_cpp import Llama
@@ -12,8 +13,8 @@ import os
 import re
 
 from config import (
-    MODEL_REPO,
-    MODEL_FILE,
+    MODELS,
+    DEFAULT_MODEL,
     SYSTEM_PROMPT,
     MAX_NEW_TOKENS,
     TEMPERATURE,
@@ -43,52 +44,61 @@ app = FastAPI(
 )
 
 # =========================================================
-# Download GGUF Model
+# CORS
 # =========================================================
 
-print(f"Downloading model from {MODEL_REPO}/{MODEL_FILE}...")
-
-model_path = hf_hub_download(
-    repo_id=MODEL_REPO,
-    filename=MODEL_FILE,
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://chat-doc-bot.vercel.app",  # production frontend
+        "http://localhost:5173",             # Local dev
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-print(f"Model downloaded at: {model_path}")
-
 # =========================================================
-# Load Llama Model
+# Load ALL Models on Startup
 # =========================================================
 
-# Replace the llm = Llama(...) block with this:
+loaded_models = {}
 
-print(f"Loading model: {model_path}")
-print(f"File exists: {os.path.exists(model_path)}")
-print(f"File size: {os.path.getsize(model_path) / 1e9:.2f} GB")
-
-try:
+def load_model(model_id):
+    """Load a model if not already loaded."""
+    if model_id in loaded_models:
+        return loaded_models[model_id]
+    
+    cfg = MODELS.get(model_id)
+    if not cfg:
+        raise ValueError(f"Unknown model: {model_id}")
+    
+    print(f"Loading {model_id} from {cfg['repo']}...")
+    
+    model_path = hf_hub_download(
+        repo_id=cfg["repo"],
+        filename=cfg["file"],
+    )
+    
+    print(f"  Downloaded: {model_path}")
+    print(f"  Size: {os.path.getsize(model_path) / 1e9:.2f} GB")
+    
     llm = Llama(
         model_path=model_path,
         n_ctx=N_CTX,
         n_threads=N_THREADS,
-        verbose=True,  # Enable verbose logging
+        verbose=False,
     )
-    print("Model loaded successfully!")
-except Exception as e:
-    import traceback
-    print("=" * 50)
-    print("MODEL LOAD FAILED - REAL ERROR:")
-    print(traceback.format_exc())
-    print("=" * 50)
-    raise RuntimeError(f"Failed to load model: {e}") from e
+    
+    loaded_models[model_id] = llm
+    print(f"  Loaded successfully!")
+    return llm
 
-#-------------
-#DEBUG
-#------------
-
-print(f"CPU count: {os.cpu_count()}")
-print(f"Using threads: {N_THREADS}")
-print(f"Model: {MODEL_FILE}")
-print(f"Model size: {os.path.getsize(model_path) / 1e9:.2f} GB")
+# Load default model on startup
+print("=" * 50)
+print("Loading default model...")
+load_model(DEFAULT_MODEL)
+print("=" * 50)
 
 # =========================================================
 # Request Models
@@ -101,6 +111,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
+    model: Optional[str] = DEFAULT_MODEL  # User selects "chat-doctor-q4" or "chat-doctor-q8"
     max_tokens: Optional[int] = MAX_NEW_TOKENS
     temperature: Optional[float] = TEMPERATURE
     stream: Optional[bool] = False
@@ -111,27 +122,10 @@ class ChatRequest(BaseModel):
 # =========================================================
 
 def clean_response(text: str) -> str:
-    # Remove special tokens
     text = re.sub(r"<\|.*?\|>", "", text)
-
-    # Add spacing after punctuation if missing
-    text = re.sub(r'([.!?])([A-Z])', r'\1 \2', text)
-
-    # Proper numbered list formatting
-    text = re.sub(r'(\d+)\.\s*', r'\n\n\1. ', text)
-
-    # Add line breaks before bullet points
-    text = re.sub(r'[-•]\s*', r'\n- ', text)
-
-    # Add spacing after colons before lists
-    text = re.sub(r':\s*(\d+\.)', r':\n\n\1', text)
-
-    # Fix merged questions
-    text = re.sub(r'\?([A-Z])', r'?\n\n\1', text)
-
-    # Collapse excessive newlines
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
+    text = re.sub(r"(\d+\.)", r"\n\1", text)
+    text = re.sub(r":\n?1\.", ":\n\n1.", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
@@ -148,32 +142,52 @@ def verify_key(authorization: str):
 # =========================================================
 
 @app.get("/health")
+@app.head("/health")  # For Uptime Robot
 async def health():
-    return {"status": "ok", "model": MODEL_FILE.replace(".gguf", "")}
+    return {
+        "status": "ok",
+        "models_loaded": list(loaded_models.keys()),
+        "default_model": DEFAULT_MODEL,
+    }
 
 
 @app.get("/v1/models")
 async def list_models():
+    """List available models with metadata."""
     return {
         "object": "list",
-        "data": [{
-            "id": MODEL_FILE.replace(".gguf", ""),
-            "object": "model",
-            "created": 1779244265,
-            "owned_by": "SatRag",
-            "description": "Medical chat assistant fine-tuned on Gemma 4 E2B",
-            "base_model": MODEL_FILE.replace(".gguf", ""),
-            "parameters": "4B",
-            "quantization": "Q4_K_M" if "q4" in MODEL_FILE.lower() else "Q8_0",
-            "context_length": N_CTX,
-            "architecture": "Gemma 4",
-        }]
+        "data": [
+            {
+                "id": model_id,
+                "object": "model",
+                "created": 1779244265,
+                "owned_by": "SatRag",
+                "name": cfg["name"],
+                "description": cfg["description"],
+                "quantization": cfg["quantization"],
+                "loaded": model_id in loaded_models,
+            }
+            for model_id, cfg in MODELS.items()
+        ]
     }
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest, authorization: str = Header(None)):
     verify_key(authorization)
+    
+    # Validate model selection
+    if request.model not in MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model. Choose from: {', '.join(MODELS.keys())}"
+        )
+    
+    # Load model if not already loaded (lazy load)
+    try:
+        llm = load_model(request.model)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
     
     messages = [m.dict() for m in request.messages]
 
@@ -226,7 +240,7 @@ async def chat_completions(request: ChatRequest, authorization: str = Header(Non
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": MODEL_FILE.replace(".gguf", ""),
+        "model": request.model,
         "choices": [{
             "index": 0,
             "message": {
