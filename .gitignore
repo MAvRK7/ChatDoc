@@ -231,4 +231,8 @@ Thumbs.db
 scripts/finetune
 checkpoints/model.pt
 
+# Node JS stuff
 node_modules/
+
+api/*.whl
+*.gguf
