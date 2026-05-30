@@ -9,7 +9,7 @@ ChatDoc answers general medical questions with concise, accurate responses. It s
 ---
 ## Architecture
 
-```text
+
 ┌─────────────┐      HTTP/REST      ┌─────────────────┐
 │  React UI   │ ◄─────────────────► │  FastAPI (HF    │
 │  (Vercel)   │   OpenAI-compatible │  Spaces Docker) │
@@ -20,11 +20,11 @@ ChatDoc answers general medical questions with concise, accurate responses. It s
                                      │  Q4 / Q8    │
                                      │  GGUF       │
                                      └─────────────┘
-```
+
 ---
 ## Tech Stack
 
-```
+
 | Layer          | Tech                                   |
 | -------------- | -------------------------------------- |
 | **Frontend**   | React 18, Vite, TailwindCSS            |
@@ -32,7 +32,7 @@ ChatDoc answers general medical questions with concise, accurate responses. It s
 | **Model**      | Gemma 4 E2B + LoRA fine-tune           |
 | **Inference**  | llama.cpp (CPU-optimized)              |
 | **Deployment** | Hugging Face Spaces (API), Vercel (UI) |
-```
+
 ---
 ## Features
 
@@ -97,7 +97,7 @@ curl -X POST https://SatRag-chat-doctor-api.hf.space/v1/chat/completions \
 ```
 ---
 ## Model Details
-```
+
 | Spec               | Value                                           |
 | ------------------ | ----------------------------------------------- |
 | Base Model         | `google/gemma-4-E2B-it`                         |
@@ -112,7 +112,6 @@ curl -X POST https://SatRag-chat-doctor-api.hf.space/v1/chat/completions \
 | Training Hardware  | Kaggle NVIDIA T4                                |
 | Training Time      | ~4–5 hours                                      |
 
-```
 ---
 ## Training Data
 
@@ -137,7 +136,7 @@ Files:
 ---
 ## Model Lineage
 
-```
+
 Training Pipeline:
 
 UltraChat + MedDialog
@@ -163,7 +162,7 @@ https://huggingface.co/SatRag/chat-doctor-gguf
 
 Q4_K_M:
 https://huggingface.co/SatRag/chat-doctor-q4
-```
+
 ---
 ## Project Structure 
 
@@ -180,7 +179,7 @@ For the complete repository structure, see the source tree.
 ---
 ## Env Variables
 
-```
+
 | Variable        | Default          | Description                        |
 | --------------- | ---------------- | ---------------------------------- |
 | `HF_TOKEN`      | —                | Hugging Face auth token            |
@@ -189,7 +188,7 @@ For the complete repository structure, see the source tree.
 | `MODEL_REPO`    | —                | Override HF repo for custom models |
 | `MODEL_FILE`    | —                | Override GGUF filename             |
 
-```
+
 ---
 
 ## Uptime Strategy
