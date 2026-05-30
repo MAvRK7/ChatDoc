@@ -9,7 +9,7 @@ ChatDoc answers general medical questions with concise, accurate responses. It s
 ---
 ## Architecture
 
-
+```
 ┌─────────────┐      HTTP/REST      ┌─────────────────┐
 │  React UI   │ ◄─────────────────► │  FastAPI (HF    │
 │  (Vercel)   │   OpenAI-compatible │  Spaces Docker) │
@@ -20,6 +20,7 @@ ChatDoc answers general medical questions with concise, accurate responses. It s
                                      │  Q4 / Q8    │
                                      │  GGUF       │
                                      └─────────────┘
+```
 
 ---
 ## Tech Stack
@@ -44,14 +45,14 @@ ChatDoc answers general medical questions with concise, accurate responses. It s
 - Medical Disclaimer — Ethical AI usage notice on every interaction
 
 ## Dual Support:
-```
+
 | Variable     | Value                     | Effect                  |
 | ------------ | ------------------------- | ----------------------- |
 | `MODEL_REPO` | `SatRag/chat-doctor-q4`   | Uses Q4 model           |
 | `MODEL_FILE` | `chat-doctor-q4.gguf`     | Q4 filename             |
 | `MODEL_REPO` | `SatRag/chat-doctor-gguf` | Uses Q8 model (default) |
 | `MODEL_FILE` | `chat-doctor.gguf`        | Q8 filename             |
-```
+
 ---
 
 ## Quick Start
@@ -136,7 +137,7 @@ Files:
 ---
 ## Model Lineage
 
-
+```
 Training Pipeline:
 
 UltraChat + MedDialog
@@ -162,6 +163,7 @@ https://huggingface.co/SatRag/chat-doctor-gguf
 
 Q4_K_M:
 https://huggingface.co/SatRag/chat-doctor-q4
+```
 
 ---
 ## Project Structure 
