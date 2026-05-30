@@ -101,36 +101,82 @@ curl -X POST https://SatRag-chat-doctor-api.hf.space/v1/chat/completions \
 | Spec               | Value                                           |
 | ------------------ | ----------------------------------------------- |
 | Base Model         | `google/gemma-4-E2B-it`                         |
-| Fine-tuning        | LoRA on medical Q\&A + curated instruction data |
+| Fine-tuning        | QLoRA (NF4) + LoRA adapter training             |
 | Parameters         | 4B                                              |
 | Quantizations      | Q4\_K\_M (~2.5GB), Q8\_0 (~5GB)                 |
 | Context Length     | 2048 tokens                                     |
 | Training Framework | TRL SFTTrainer with assistant-only masking      |
-```
+| LoRA Rank          | 8                                               |
+| LoRA Alpha         | 16                                              |
+| LoRA Dropout       | 0.05                                            |
+| Training Hardware  | Kaggle NVIDIA T4                                |
+| Training Time      | ~4–5 hours                                      |
 
+```
+---
+## Training Data
+
+ChatDoc was fine-tuned using a custom dataset created by combining:
+
+- UltraChat conversational data
+- MedDialog medical conversations
+
+The combined dataset was cleaned, anonymized, converted to a unified
+JSONL chat format, and split into:
+
+- Training set (95%)
+- Validation set (5%)
+
+Dataset:
+https://www.kaggle.com/datasets/satvikraghav/cleaned-anon-jsonl
+
+Files:
+- train.jsonl (1.38 GB)
+- val_formatted.jsonl (73.25 MB)
+
+---
+## Model Lineage
+
+```
+Training Pipeline:
+
+UltraChat + MedDialog
+        ↓
+Cleaned / Anonymized Dataset
+        ↓
+95/5 Train/Validation Split
+        ↓
+Fine-Tuned Gemma 4 E2B (QLoRA)
+        ↓
+LoRA Adapter
+
+https://www.kaggle.com/datasets/satvikraghav/chat-doctor-gemma4-lora
+
+        ↓ Merge with Base Model
+
+https://www.kaggle.com/datasets/satvikraghav/chat-doctor-merged
+
+        ↓ GGUF Conversion
+
+Q8_0:
+https://huggingface.co/SatRag/chat-doctor-gguf
+
+Q4_K_M:
+https://huggingface.co/SatRag/chat-doctor-q4
+```
+---
 ## Project Structure 
 
 ```
-├── app.py                    # FastAPI server
-├── config.py                 # Model & generation config
-├── Dockerfile                # HF Spaces build
-├── requirements.txt
-└── chat-doctor-frontend/
-    ├── src/
-    │   ├── App.jsx
-    │   ├── components/
-    │   │   ├── ChatMessage.jsx
-    │   │   ├── ChatInput.jsx
-    │   │   ├── Header.jsx
-    │   │   ├── InfoModal.jsx
-    │   │   ├── SuggestionCards.jsx
-    │   │   └── ThinkingIndicator.jsx
-    │   └── hooks/
-    │       └── useChatStream.js
-    ├── index.html
-    ├── package.json
-    └── tailwind.config.js
+mavrk7-chatdoc/
+├── api/            # FastAPI inference server
+├── frontend/       # React/Vite web application
+├── production/     # Training and deployment pipelines
+├── research/       # Earlier transformer/MoE/distillation work
+└── checkpoints/    # Model artifacts
 ```
+For the complete repository structure, see the source tree.
+
 ---
 ## Env Variables
 
@@ -146,11 +192,48 @@ curl -X POST https://SatRag-chat-doctor-api.hf.space/v1/chat/completions \
 ```
 ---
 
+## Uptime Strategy
+
+A lightweight uptime monitor (UptimeRobot) periodically sends HEAD requests to
+the `/health` endpoint to reduce cold starts in serverless deployment.
+---
 ## Limitations
 
 - CPU-only inference — Responses take 5-15 seconds depending on length
 - Not a substitute for professional medical advice — Always consult a doctor for serious symptoms
-- General health Q&A only — No diagnosis, prescriptions, or emergency guidance
+- General health Q&A only — Responses are informational and may be incorrect, incomplete, or outdated
+- Not intended for diagnosis, treatment decisions, prescriptions, or emergency medical situations
+
+---
+
+## Project Evolution
+
+ChatDoc began as an experiment in training a custom medical language model from scratch.
+
+The project progressed through several stages:
+
+1. Custom Transformer implementation
+2. Mixture-of-Experts (MoE) experimentation
+3. Knowledge distillation pipeline
+4. Dataset curation and evaluation tooling
+5. QLoRA fine-tuning of Gemma 4 E2B
+6. GGUF quantization and production deployment
+
+While the custom-model and distillation approaches did not achieve the desired quality-performance tradeoff, they provided valuable infrastructure for dataset processing, evaluation, and experimentation that ultimately informed the final ChatDoc system.
+---
+## Research Artifacts
+
+The repository also contains earlier experimental work including:
+
+- Custom Transformer implementations
+- Mixture-of-Experts (MoE) architectures
+- Distillation pipelines
+- Dataset evaluation tooling
+- Tokenizer experimentation
+
+These artifacts are preserved for research and reproducibility purposes and document the evolution of the project before the final Gemma 4 QLoRA approach.
+
+For more informaion about that please checkout the README in /research
 
 ---
 

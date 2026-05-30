@@ -1,3 +1,71 @@
+'''
+============================================================
+Training Data & Fine-Tuning Information
+============================================================
+
+Base Model:
+    google/gemma-4-E2B-it
+
+Dataset Preparation:
+
+This model was fine-tuned on a custom dataset created by
+combining UltraChat and MedDialog conversation data.
+
+The combined dataset was:
+    - Cleaned and anonymized
+    - Converted to a unified JSONL chat format
+    - Split into 95% training and 5% validation data
+    - Uploaded to Kaggle for storage and distribution
+
+Dataset Files:
+
+Training Split (95%):
+https://www.kaggle.com/datasets/satvikraghav/cleaned-anon-jsonl?select=train.jsonl
+File: train.jsonl (1.38 GB)
+
+Validation Split (5%):
+https://www.kaggle.com/datasets/satvikraghav/cleaned-anon-jsonl?select=val_formatted.jsonl
+File: val_formatted.jsonl (73.25 MB)
+
+Training Method:
+    - QLoRA (4-bit NF4 quantization)
+    - Assistant-only loss masking
+    - LoRA Rank (r): 8
+    - LoRA Alpha: 16
+    - LoRA Dropout: 0.05
+    - Mixed instruction-tuning using general chat and medical data
+
+Environment:
+    - Trained on Kaggle NVIDIA T4 GPUs
+    - Training time: approximately 4–5 hours
+    - Transformers version: 5.8.0
+      (required for Gemma 4 support)
+
+This script saves LoRA adapter weights that can be loaded 
+on top of the base Gemma 4 model or merged for inference. 
+
+The resulting adapter was published as: 
+https://www.kaggle.com/datasets/satvikraghav/chat-doctor-gemma4-lora 
+
+Package Contents: 
+    - adapter_model.safetensors 
+    - adapter_config.json 
+    - tokenizer.json 
+    - tokenizer_config.json 
+    - chat_template.jinja 
+    - README.md 
+    
+Package Size: 
+    - Version 1: 92.02 MB 
+
+Note: The published package contains LoRA adapter weights, 
+not the full Gemma 4 model.
+
+Date: 2026-05-16
+
+============================================================
+'''
+
 import os
 import json
 import gc
