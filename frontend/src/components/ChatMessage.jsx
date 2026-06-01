@@ -1,4 +1,3 @@
-
 import { useState } from 'react'
 
 function ChatMessage({ message, isLast }) {
@@ -9,6 +8,17 @@ function ChatMessage({ message, isLast }) {
     navigator.clipboard.writeText(message.content)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
+  }
+
+  // Convert newlines to <br/> tags for reliable rendering
+  const renderContent = (text) => {
+    if (!text) return null
+    return text.split('\n').map((line, idx, arr) => (
+      <span key={idx}>
+        {line}
+        {idx < arr.length - 1 && <br />}
+      </span>
+    ))
   }
 
   return (
@@ -33,9 +43,9 @@ function ChatMessage({ message, isLast }) {
           }
           ${!isUser && isLast ? 'glow-accent' : ''}
         `}>
-          <p className="text-sm leading-relaxed whitespace-pre-wrap">
-            {message.content || (message.isStreaming ? '' : '...')}
-          </p>
+          <div className="text-sm leading-relaxed whitespace-pre-wrap">
+            {message.content ? renderContent(message.content) : (message.isStreaming ? '' : '...')}
+          </div>
         </div>
 
         {/* Copy button for assistant */}
