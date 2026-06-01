@@ -1,27 +1,28 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback } from 'react'
 
 const API_URL = 'https://SatRag-chat-doctor-api.hf.space/v1/chat/completions'
 const API_KEY = 'test-key-123'
 
 export default function useChatStream({ selectedModel, onStart, onFirstToken, onMessage, onComplete }) {
   const [isStreaming, setIsStreaming] = useState(false)
-  const fullMessageRef = useRef('')
-  const lastFormattedLengthRef = useRef(0)
 
-  const formatResponse = (text) => {
-    let formatted = text.replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
-    formatted = formatted.replace(/([^\n])(\d+\.)/g, '$1\n$2')
-    formatted = formatted.replace(/\.([A-Za-z0-9])/g, '. $1')
-    formatted = formatted.replace(/\s{2,}/g, ' ')
-    formatted = formatted.replace(/:([A-Za-z])/g, ': $1')
+  // Simple formatting for each chunk
+  const formatChunk = (text) => {
+    // Only fix common issues at chunk level
+    let formatted = text
+      // Add space after number period: "1.Rest" -> "1. Rest"
+      .replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
+      // Add space after period followed by letter
+      .replace(/\.([A-Za-z])/g, '. $1')
+      // Add newline before numbers (but only if not already there)
+      .replace(/([^\n])(\d+\.)/g, '$1\n$2')
+    
     return formatted
   }
 
   const sendMessage = useCallback(async (messages) => {
     setIsStreaming(true)
     onStart?.()
-    fullMessageRef.current = ''
-    lastFormattedLengthRef.current = 0
 
     try {
       const response = await fetch(API_URL, {
@@ -48,7 +49,6 @@ export default function useChatStream({ selectedModel, onStart, onFirstToken, on
       const decoder = new TextDecoder()
       let buffer = ''
       let firstTokenReceived = false
-      let formatTimeout = null
 
       while (true) {
         const { done, value } = await reader.read()
@@ -67,37 +67,22 @@ export default function useChatStream({ selectedModel, onStart, onFirstToken, on
 
           try {
             const parsed = JSON.parse(data)
-            const content = parsed.choices?.[0]?.delta?.content
+            let content = parsed.choices?.[0]?.delta?.content
             
             if (content) {
               if (!firstTokenReceived) {
                 firstTokenReceived = true
                 onFirstToken?.()
               }
-              
-              fullMessageRef.current += content
-              
-              // Only format and update every few chunks or on natural breaks (periods, newlines)
-              const shouldFormat = 
-                fullMessageRef.current.length - lastFormattedLengthRef.current > 50 || // Every 50 chars
-                /[.!?]\s*$/.test(fullMessageRef.current) || // After sentence endings
-                /\d+\./.test(content) // When we see list numbers
-              
-              if (shouldFormat) {
-                const formattedMessage = formatResponse(fullMessageRef.current)
-                onMessage?.(formattedMessage)
-                lastFormattedLengthRef.current = fullMessageRef.current.length
-              }
+              // Just format the individual chunk
+              content = formatChunk(content)
+              onMessage?.(content)
             }
           } catch (e) {
             // Skip malformed
           }
         }
       }
-      
-      // Final format at the end
-      const finalFormatted = formatResponse(fullMessageRef.current)
-      onMessage?.(finalFormatted)
 
       onComplete?.()
     } catch (error) {
