@@ -122,10 +122,22 @@ class ChatRequest(BaseModel):
 # =========================================================
 
 def clean_response(text: str) -> str:
+    # Remove special tokens
     text = re.sub(r"<\|.*?\|>", "", text)
+    
+    # Fix numbered lists: "1.text" -> "1. text"
+    text = re.sub(r"(\d+)\.([A-Za-z])", r"\1. \2", text)
+    
+    # Ensure newlines before list items
     text = re.sub(r"(\d+\.)", r"\n\1", text)
-    text = re.sub(r":\n?1\.", ":\n\n1.", text)
+    
+    # Fix space after periods (but not decimal points)
+    text = re.sub(r"\.([A-Z])", r". \1", text)
+    
+    # Clean up multiple spaces and newlines
+    text = re.sub(r" +", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    
     return text.strip()
 
 
