@@ -1,34 +1,27 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 
 const API_URL = 'https://SatRag-chat-doctor-api.hf.space/v1/chat/completions'
 const API_KEY = 'test-key-123'
 
 export default function useChatStream({ selectedModel, onStart, onFirstToken, onMessage, onComplete }) {
   const [isStreaming, setIsStreaming] = useState(false)
+  const fullMessageRef = useRef('')
+  const lastFormattedLengthRef = useRef(0)
 
-  // Add this formatting function
   const formatResponse = (text) => {
-    // Fix numbered lists: "1.text" -> "1. text"
     let formatted = text.replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
-    
-    // Add newlines before numbers if missing
-    formatted = formatted.replace(/([^.])(\d+\.)/g, '$1\n$2')
-    
-    // Fix spacing after periods
-    formatted = formatted.replace(/\.([A-Z])/g, '. $1')
-    
-    // Clean up multiple spaces
-    formatted = formatted.replace(/\s+/g, ' ')
-    
-    // Clean up multiple newlines
-    formatted = formatted.replace(/\n{3,}/g, '\n\n')
-    
+    formatted = formatted.replace(/([^\n])(\d+\.)/g, '$1\n$2')
+    formatted = formatted.replace(/\.([A-Za-z0-9])/g, '. $1')
+    formatted = formatted.replace(/\s{2,}/g, ' ')
+    formatted = formatted.replace(/:([A-Za-z])/g, ': $1')
     return formatted
   }
 
   const sendMessage = useCallback(async (messages) => {
     setIsStreaming(true)
     onStart?.()
+    fullMessageRef.current = ''
+    lastFormattedLengthRef.current = 0
 
     try {
       const response = await fetch(API_URL, {
@@ -38,7 +31,7 @@ export default function useChatStream({ selectedModel, onStart, onFirstToken, on
           'Authorization': `Bearer ${API_KEY}`
         },
         body: JSON.stringify({
-          model: selectedModel,  // "chat-doctor-q4" or "chat-doctor-q8"
+          model: selectedModel,
           messages: messages,
           stream: true,
           max_tokens: 160,
@@ -55,6 +48,7 @@ export default function useChatStream({ selectedModel, onStart, onFirstToken, on
       const decoder = new TextDecoder()
       let buffer = ''
       let firstTokenReceived = false
+      let formatTimeout = null
 
       while (true) {
         const { done, value } = await reader.read()
@@ -80,15 +74,30 @@ export default function useChatStream({ selectedModel, onStart, onFirstToken, on
                 firstTokenReceived = true
                 onFirstToken?.()
               }
-              // Apply formatting to the content
-              const formattedContent = formatResponse(content)
-              onMessage?.(formattedContent)
+              
+              fullMessageRef.current += content
+              
+              // Only format and update every few chunks or on natural breaks (periods, newlines)
+              const shouldFormat = 
+                fullMessageRef.current.length - lastFormattedLengthRef.current > 50 || // Every 50 chars
+                /[.!?]\s*$/.test(fullMessageRef.current) || // After sentence endings
+                /\d+\./.test(content) // When we see list numbers
+              
+              if (shouldFormat) {
+                const formattedMessage = formatResponse(fullMessageRef.current)
+                onMessage?.(formattedMessage)
+                lastFormattedLengthRef.current = fullMessageRef.current.length
+              }
             }
           } catch (e) {
             // Skip malformed
           }
         }
       }
+      
+      // Final format at the end
+      const finalFormatted = formatResponse(fullMessageRef.current)
+      onMessage?.(finalFormatted)
 
       onComplete?.()
     } catch (error) {
