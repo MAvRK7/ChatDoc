@@ -6,6 +6,26 @@ const API_KEY = 'test-key-123'
 export default function useChatStream({ selectedModel, onStart, onFirstToken, onMessage, onComplete }) {
   const [isStreaming, setIsStreaming] = useState(false)
 
+  // Add this formatting function
+  const formatResponse = (text) => {
+    // Fix numbered lists: "1.text" -> "1. text"
+    let formatted = text.replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
+    
+    // Add newlines before numbers if missing
+    formatted = formatted.replace(/([^.])(\d+\.)/g, '$1\n$2')
+    
+    // Fix spacing after periods
+    formatted = formatted.replace(/\.([A-Z])/g, '. $1')
+    
+    // Clean up multiple spaces
+    formatted = formatted.replace(/\s+/g, ' ')
+    
+    // Clean up multiple newlines
+    formatted = formatted.replace(/\n{3,}/g, '\n\n')
+    
+    return formatted
+  }
+
   const sendMessage = useCallback(async (messages) => {
     setIsStreaming(true)
     onStart?.()
@@ -60,7 +80,9 @@ export default function useChatStream({ selectedModel, onStart, onFirstToken, on
                 firstTokenReceived = true
                 onFirstToken?.()
               }
-              onMessage?.(content)
+              // Apply formatting to the content
+              const formattedContent = formatResponse(content)
+              onMessage?.(formattedContent)
             }
           } catch (e) {
             // Skip malformed
