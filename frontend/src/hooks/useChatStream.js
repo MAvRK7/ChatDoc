@@ -1,98 +1,104 @@
-import { useState, useCallback } from 'react'
+import { useState } from 'react'
 
-const API_URL = 'https://SatRag-chat-doctor-api.hf.space/v1/chat/completions'
-const API_KEY = 'test-key-123'
+function ChatMessage({ message, isLast }) {
+  const isUser = message.role === 'user'
+  const [copied, setCopied] = useState(false)
 
-export default function useChatStream({ selectedModel, onStart, onFirstToken, onMessage, onComplete }) {
-  const [isStreaming, setIsStreaming] = useState(false)
-
-  // Simple formatting for each chunk
-  const formatChunk = (text) => {
-    // Only fix common issues at chunk level
-    let formatted = text
-      // Add space after number period: "1.Rest" -> "1. Rest"
-      .replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
-      // Add space after period followed by letter
-      .replace(/\.([A-Za-z])/g, '. $1')
-      // Add newline before numbers (but only if not already there)
-      .replace(/([^\n])(\d+\.)/g, '$1\n$2')
-    
-    return formatted
+  const handleCopy = () => {
+    navigator.clipboard.writeText(message.content)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }
 
-  const sendMessage = useCallback(async (messages) => {
-    setIsStreaming(true)
-    onStart?.()
+  return (
+    <div
+      className={`flex ${
+        isUser ? 'justify-end' : 'justify-start'
+      } mb-4 animate-fade-in`}
+    >
+      <div
+        className={`max-w-[85%] md:max-w-[75%] ${
+          isUser ? 'order-2' : 'order-1'
+        }`}
+      >
+        <div
+          className={`flex items-center gap-2 mb-1 ${
+            isUser ? 'justify-end' : 'justify-start'
+          }`}
+        >
+          <span className="text-xs font-medium text-chat-muted">
+            {isUser ? 'You' : 'ChatDoc'}
+          </span>
 
-    try {
-      const response = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${API_KEY}`
-        },
-        body: JSON.stringify({
-          model: selectedModel,
-          messages: messages,
-          stream: true,
-          max_tokens: 160,
-          temperature: 0.3
-        })
-      })
+          {!isUser && message.isStreaming && (
+            <span className="text-xs text-chat-accent animate-pulse">
+              ●
+            </span>
+          )}
+        </div>
 
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.detail || `HTTP ${response.status}`)
-      }
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let firstTokenReceived = false
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop()
-
-        for (const line of lines) {
-          const trimmed = line.trim()
-          if (!trimmed || !trimmed.startsWith('data: ')) continue
-          
-          const data = trimmed.slice(6)
-          if (data === '[DONE]') continue
-
-          try {
-            const parsed = JSON.parse(data)
-            let content = parsed.choices?.[0]?.delta?.content
-            
-            if (content) {
-              if (!firstTokenReceived) {
-                firstTokenReceived = true
-                onFirstToken?.()
-              }
-              // Just format the individual chunk
-              content = formatChunk(content)
-              onMessage?.(content)
+        <div
+          className={`
+            rounded-2xl px-4 py-3
+            ${
+              isUser
+                ? 'bg-chat-accent text-chat-bg rounded-br-md'
+                : 'bg-chat-panel text-chat-text rounded-bl-md border border-chat-panel/50'
             }
-          } catch (e) {
-            // Skip malformed
-          }
-        }
-      }
+            ${!isUser && isLast ? 'glow-accent' : ''}
+          `}
+        >
+          {/* Preserves newlines and spacing from streamed content */}
+          <p className="text-sm leading-relaxed whitespace-pre-wrap">
+            {message.content || (message.isStreaming ? '' : '...')}
+          </p>
+        </div>
 
-      onComplete?.()
-    } catch (error) {
-      console.error('Stream error:', error)
-      onMessage?.(`\n\n[Error: ${error.message}]`)
-      onComplete?.()
-    } finally {
-      setIsStreaming(false)
-    }
-  }, [selectedModel, onStart, onFirstToken, onMessage, onComplete])
-
-  return { sendMessage, isStreaming }
+        {!isUser && message.content && !message.isStreaming && (
+          <button
+            onClick={handleCopy}
+            className="mt-2 flex items-center gap-1 text-xs text-chat-muted hover:text-chat-accent transition-colors"
+          >
+            {copied ? (
+              <>
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M5 13l4 4L19 7"
+                  />
+                </svg>
+                Copied
+              </>
+            ) : (
+              <>
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                  />
+                </svg>
+                Copy
+              </>
+            )}
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
+
+export default ChatMessage
