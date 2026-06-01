@@ -10,10 +10,21 @@ function ChatMessage({ message, isLast }) {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  // Convert newlines to <br/> tags for reliable rendering
-  const renderContent = (text) => {
-    if (!text) return null
-    return text.split('\n').map((line, idx, arr) => (
+  // Format text: add newlines before numbered items and spaces after dots
+  const formatText = (text) => {
+    if (!text) return ''
+    // Insert newline before any number followed by a dot (e.g., "1.", "2.") if not already on a new line
+    let formatted = text.replace(/([^\n])(\d+\.)/g, '$1\n$2')
+    // Add space after the dot if missing (e.g., "1.Rest" → "1. Rest")
+    formatted = formatted.replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
+    return formatted
+  }
+
+  // Convert newlines to <br/> tags (now guaranteed because we added them)
+  const renderContent = (rawText) => {
+    if (!rawText) return null
+    const textWithNewlines = formatText(rawText)
+    return textWithNewlines.split('\n').map((line, idx, arr) => (
       <span key={idx}>
         {line}
         {idx < arr.length - 1 && <br />}
@@ -43,7 +54,7 @@ function ChatMessage({ message, isLast }) {
           }
           ${!isUser && isLast ? 'glow-accent' : ''}
         `}>
-          <div className="text-sm leading-relaxed whitespace-pre-wrap">
+          <div className="text-sm leading-relaxed">
             {message.content ? renderContent(message.content) : (message.isStreaming ? '' : '...')}
           </div>
         </div>
