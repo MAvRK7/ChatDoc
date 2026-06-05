@@ -53,3 +53,51 @@ body {
 .animate-pulse-dot {
   animation: pulse 1.4s ease-in-out infinite;
 }
+
+/* Markdown styling for assistant messages */
+.prose {
+  max-width: none;
+}
+
+.prose-invert {
+  --tw-prose-body: #E6EEF8;
+  --tw-prose-headings: #E6EEF8;
+  --tw-prose-lead: #E6EEF8;
+  --tw-prose-links: #5BC0EB;
+  --tw-prose-bold: #E6EEF8;
+  --tw-prose-counters: #94A3B8;
+  --tw-prose-bullets: #94A3B8;
+  --tw-prose-hr: #1a3352;
+  --tw-prose-quotes: #E6EEF8;
+  --tw-prose-quote-borders: #5BC0EB;
+  --tw-prose-captions: #94A3B8;
+  --tw-prose-code: #E6EEF8;
+  --tw-prose-pre-code: #E6EEF8;
+  --tw-prose-pre-bg: #0a1525;
+  --tw-prose-th-borders: #1a3352;
+  --tw-prose-td-borders: #1a3352;
+}
+
+.prose ul, .prose ol {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  padding-left: 1.5em;
+}
+
+.prose li {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.prose p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose :first-child {
+  margin-top: 0;
+}
+
+.prose :last-child {
+  margin-bottom: 0;
+}

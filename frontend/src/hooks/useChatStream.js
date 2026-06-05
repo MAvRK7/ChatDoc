@@ -21,7 +21,7 @@ export default function useChatStream({ selectedModel, onStart, onFirstToken, on
           model: selectedModel,
           messages: messages,
           stream: true,
-          max_tokens: 160,
+          max_tokens: 500,
           temperature: 0.3
         })
       })

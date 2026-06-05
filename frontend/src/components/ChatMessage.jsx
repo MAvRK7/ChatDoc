@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import ReactMarkdown from 'react-markdown'
 
 function ChatMessage({ message, isLast }) {
   const isUser = message.role === 'user'
@@ -10,32 +11,31 @@ function ChatMessage({ message, isLast }) {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  // Format text: add newlines before numbered items and spaces after dots
-  const formatText = (text) => {
+  // Convert model output to proper markdown
+  const toMarkdown = (text) => {
     if (!text) return ''
-    // Insert newline before any number followed by a dot (e.g., "1.", "2.") if not already on a new line
-    let formatted = text.replace(/([^\n])(\d+\.)/g, '$1\n$2')
-    // Add space after the dot if missing (e.g., "1.Rest" → "1. Rest")
-    formatted = formatted.replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
+    
+    let formatted = text
+      .replace(/([a-z])If\b/g, '$1 If')
+      .replace(/([a-z])And\b/g, '$1 and')
+      .replace(/([a-z])Or\b/g, '$1 or')
+      .replace(/(\d+\.)/g, '\n$1')
+      .replace(/(\d+)\.([A-Za-z])/g, '$1. $2')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/^\n+/, '')
+      .replace(/\.([A-Za-z])/g, '. $1')
+    
     return formatted
   }
 
-  // Convert newlines to <br/> tags (now guaranteed because we added them)
-  const renderContent = (rawText) => {
-    if (!rawText) return null
-    const textWithNewlines = formatText(rawText)
-    return textWithNewlines.split('\n').map((line, idx, arr) => (
-      <span key={idx}>
-        {line}
-        {idx < arr.length - 1 && <br />}
-      </span>
-    ))
-  }
+  // ONLY recompute when message.content changes
+  const processedContent = useMemo(() => {
+    return !isUser ? toMarkdown(message.content) : message.content
+  }, [message.content, isUser])
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4 animate-fade-in`}>
       <div className={`max-w-[85%] md:max-w-[75%] ${isUser ? 'order-2' : 'order-1'}`}>
-        {/* Label */}
         <div className={`flex items-center gap-2 mb-1 ${isUser ? 'justify-end' : 'justify-start'}`}>
           <span className="text-xs font-medium text-chat-muted">
             {isUser ? 'You' : 'ChatDoc'}
@@ -45,7 +45,6 @@ function ChatMessage({ message, isLast }) {
           )}
         </div>
 
-        {/* Message bubble */}
         <div className={`
           rounded-2xl px-4 py-3 
           ${isUser 
@@ -54,12 +53,19 @@ function ChatMessage({ message, isLast }) {
           }
           ${!isUser && isLast ? 'glow-accent' : ''}
         `}>
-          <div className="text-sm leading-relaxed">
-            {message.content ? renderContent(message.content) : (message.isStreaming ? '' : '...')}
-          </div>
+          {isUser ? (
+            <div className="text-sm leading-relaxed whitespace-pre-wrap">
+              {message.content || (message.isStreaming ? '' : '...')}
+            </div>
+          ) : (
+            <div className="prose prose-invert prose-sm max-w-none">
+              <ReactMarkdown>
+                {processedContent}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
 
-        {/* Copy button for assistant */}
         {!isUser && message.content && !message.isStreaming && (
           <button
             onClick={handleCopy}
